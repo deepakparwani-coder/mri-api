@@ -17,19 +17,18 @@ QUERIES = {
         MATCH (c:City {name: $city})-[r:MARKET_SNAPSHOT]->(q:Quarter)
         WITH q, r ORDER BY q.sort_order DESC LIMIT 4
         RETURN q.label AS quarter,
-               r.marketable_supply_units AS supply,
+               r.supply_units AS supply,
                r.sales_units AS sales,
                r.unsold_units AS unsold,
                r.months_inventory AS months_inv,
-               r.sales_velocity_pct AS velocity,
-               r.avg_saleable_price_psf AS avg_price
+               r.sales_velocity_pct AS velocity
         ORDER BY q.sort_order
     """,
 
     "annual_overview": """
         MATCH (c:City {name: $city})-[r:ANNUAL_SNAPSHOT]->(f:FiscalYear)
         RETURN f.id AS fiscal_year,
-               r.marketable_supply_units AS supply,
+               r.supply_units AS supply,
                r.sales_units AS sales,
                r.unsold_units AS unsold,
                r.months_inventory AS months_inv,
@@ -117,17 +116,17 @@ QUERIES = {
     "flat_performance": """
         MATCH (c:City {name: $city})-[r:FLAT_PERFORMANCE]->(c)
         RETURN r.config AS configuration,
-               r.annual_sales_units AS annual_sales,
-               r.quarterly_sales_units AS qtr_sales,
-               r.unsold_units AS unsold,
-               r.marketable_supply_units AS supply,
-               r.avg_saleable_price_psf AS avg_price,
-               r.months_inv_annual AS months_inv,
-               r.velocity_pct AS velocity,
-               r.product_efficiency_pct AS efficiency,
-               r.min_cost_lacs AS min_cost,
-               r.max_cost_lacs AS max_cost
-        ORDER BY r.annual_sales_units DESC
+               r.annual_sales AS annual_sales,
+               r.qtr_sales AS qtr_sales,
+               r.unsold AS unsold,
+               r.mkt_supply AS supply,
+               r.avg_price AS avg_price,
+               r.carpet_price AS carpet_price,
+               r.mi_annual AS months_inv,
+               r.mi_qtr AS months_inv_qtr,
+               r.velocity AS velocity,
+               r.efficiency AS efficiency
+        ORDER BY r.annual_sales DESC
     """,
 
     # ═══════════════════════════════════════
@@ -277,11 +276,11 @@ QUERIES = {
         MATCH (c:City {name: $city})-[r:MARKET_SNAPSHOT]->(q:Quarter)
         RETURN q.label AS quarter,
                r.sales_units AS absorption_units,
-               r.marketable_supply_units AS supply_units,
+               r.supply_units AS supply_units,
                r.months_inventory AS months_inv,
                r.sales_velocity_pct AS velocity,
-               CASE WHEN r.marketable_supply_units > 0
-                    THEN round(r.sales_units * 100.0 / r.marketable_supply_units * 10) / 10
+               CASE WHEN r.supply_units > 0
+                    THEN round(r.sales_units * 100.0 / r.supply_units * 10) / 10
                     ELSE 0 END AS absorption_rate_pct
         ORDER BY q.sort_order
     """,
