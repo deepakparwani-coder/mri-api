@@ -57,7 +57,14 @@ claude = None
 def get_driver():
     global driver
     if driver is None:
-        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+        driver = GraphDatabase.driver(
+            NEO4J_URI, 
+            auth=(NEO4J_USER, NEO4J_PASSWORD),
+            max_connection_lifetime=300,
+            max_connection_pool_size=10,
+            connection_acquisition_timeout=30,
+            connection_timeout=15
+        )
     return driver
 
 
@@ -76,9 +83,13 @@ def run_query(query_name, **params):
     cypher = QUERIES[query_name]
     d = get_driver()
 
-    with d.session(database='c26f3089') as session:
-        result = session.run(cypher, **params)
-        records = [dict(record) for record in result]
+    try:
+        with d.session(database='c26f3089') as session:
+            result = session.run(cypher, **params)
+            records = [dict(record) for record in result]
+    except Exception as e:
+        print(f"  ✗ Query {query_name} failed: {e}")
+        return {"error": str(e), "query": query_name, "row_count": 0, "data": [], "source": "error"}
 
     # Attach data lineage
     return {
@@ -203,6 +214,10 @@ def classify_intent(query, city):
         results.append(run_query("price_trend_saleable", city=city))
         results.append(run_query("flat_performance", city=city))
 
+    # Cap at 3 queries max to prevent timeout
+    if len(results) > 3:
+        results = results[:3]
+
     # Default: market overview
     if not results:
         results.append(run_query("market_overview", city=city))
@@ -273,7 +288,11 @@ def handle_query():
         return jsonify({"error": "No query provided"}), 400
 
     # Step 1: Get data from Neo4j
-    data_results = classify_intent(user_query, city)
+    try:
+        data_results = classify_intent(user_query, city)
+    except Exception as e:
+        print(f"Neo4j query failed: {e}")
+        return jsonify({"error": f"Database connection issue: {str(e)}. Please try again."}), 503
 
     # Step 2: Format data for Claude
     data_text = f"CITY: {city}\n\n"
