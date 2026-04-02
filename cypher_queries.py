@@ -134,7 +134,8 @@ QUERIES = {
     # ═══════════════════════════════════════
 
     "project_detail": """
-        MATCH (p:Project {name: $project_name, city: $city})
+        MATCH (p:Project {city: $city})
+        WHERE toLower(p.name) CONTAINS toLower($project_name)
         OPTIONAL MATCH (p)-[:BUILT_BY]->(b:Builder)
         OPTIONAL MATCH (m:MicroMarket)-[:HAS_PROJECT]->(p)
         RETURN p.name AS project,
@@ -156,9 +157,11 @@ QUERIES = {
     """,
 
     "project_competitors": """
-        MATCH (p:Project {name: $project_name, city: $city})
-        MATCH (m:MicroMarket)-[:HAS_PROJECT]->(p)
-        MATCH (m)-[:HAS_PROJECT]->(comp:Project)
+        MATCH (p:Project {city: $city})
+        WHERE toLower(p.name) CONTAINS toLower($project_name)
+        WITH p LIMIT 1
+        OPTIONAL MATCH (m:MicroMarket)-[:HAS_PROJECT]->(p)
+        OPTIONAL MATCH (m)-[:HAS_PROJECT]->(comp:Project)
         WHERE comp.project_id <> p.project_id AND comp.status <> 'SOLD_OUT'
         RETURN comp.name AS competitor,
                comp.builder_name AS builder,

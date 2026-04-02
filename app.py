@@ -158,9 +158,22 @@ def classify_intent(query, city):
         results.append(run_query("price_trend_saleable", city=city))
         results.append(run_query("flat_performance", city=city))
 
+    # Project-specific query — extract project name and search
+    # Match patterns like "performance of X", "about X", "X project", "X by builder"
+    project_match = re.search(r'(?:performance|summary|details?|about|analyse|analyze|report)\s+(?:of\s+|for\s+)?(.+?)(?:\s+in\s+|\s+at\s+|$)', query, re.I)
+    if not project_match:
+        project_match = re.search(r'(?:give|show|get)\s+(?:me\s+)?(?:.*?)\s+(?:of|for)\s+(.+?)(?:\s+in\s+|\s+at\s+|$)', query, re.I)
+    
+    if project_match:
+        proj_name = project_match.group(1).strip().rstrip('.')
+        # Clean up city name from project name
+        proj_name = re.sub(r'\s*(?:in|at)\s+(?:gurgaon|gurugram|kolkata|hinjewadi|pune|mumbai).*$', '', proj_name, flags=re.I).strip()
+        if len(proj_name) > 3 and not re.match(r'^(market|city|area|location|sector|residential|overview)$', proj_name, re.I):
+            results.append(run_query("project_detail", city=city, project_name=proj_name))
+            results.append(run_query("project_competitors", city=city, project_name=proj_name))
+
     # Site intelligence / location
     if re.search(r'site.*intel|location|sector|due.dilig', q):
-        # Try to extract location name
         loc_match = re.search(r'sector\s*[-]?\s*\d+\w*|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*', query)
         if loc_match:
             loc = loc_match.group()
@@ -231,44 +244,44 @@ def classify_intent(query, city):
 # ═══════════════════════════════════════
 SYSTEM_PROMPT = """You are MR&I (Market Research & Intelligence), a precision real estate analytics engine.
 
-ABSOLUTE RULES:
-1. Every number you present MUST come from the data provided below. Zero exceptions.
-2. If a number is not in the data, say "data not available" — NEVER estimate or approximate.
-3. Use Indian formatting: ₹, Lakhs, Crores, PSF.
-4. Every data point has a source tag (query name + row). Cite these when presenting.
-5. For location analysis beyond what's in the data, you may add general knowledge context but CLEARLY label it as "General context (not from LF data):"
+ABSOLUTE RULES (NEVER VIOLATE):
+1. EVERY number you present MUST come from the data provided below. ZERO exceptions.
+2. If a number is not in the data, say 'Data not available' — NEVER estimate or fabricate.
+3. NEVER reference future years beyond the latest quarter in the data. If data ends at Q3 25-26, you CANNOT state anything about 2027, 2028 as fact.
+4. NEVER fabricate project names, builder names, or locations not in the data.
+5. When recommending strategies — frame as 'recommendations based on current data' NOT predictions.
+6. Use Indian formatting: Rs., Lakhs, Crores, PSF.
+7. Clearly separate 'The data shows...' (fact) from 'Based on this, we can infer...' (analysis).
 
-DATA LINEAGE:
-The data below was queried directly from a Neo4j knowledge graph built from Liases Foras proprietary research data. Each result set shows:
-- query: the Cypher query name that produced it
-- row_count: exact number of records
-- data: the actual records
-- source: always "LF_database_via_neo4j"
+CHART RULES (CRITICAL):
+- NEVER combine metrics with different scales on same chart (Sales in thousands + MI in single digits = WRONG)
+- Use SEPARATE charts for metrics with different magnitudes
+- Chart title: use 'and' not '&' (causes rendering issues)
+- Format: <lfchart type="bar|line|doughnut|hbar" title="Title"><labels>L1,L2</labels><dataset label="Name" color="#hex">v1,v2</dataset></lfchart>
+- Colors: #c9a84c #3b82f6 #22c55e #ef4444 #8b5cf6 #06b6d4
+- Values must be plain numbers only
 
-CHART FORMAT:
-<lfchart type="bar|line|doughnut|hbar" title="Title">
-<labels>L1,L2</labels>
-<dataset label="Name" color="#hex">v1,v2</dataset>
-</lfchart>
-Colors: #c9a84c #3b82f6 #22c55e #ef4444 #8b5cf6 #06b6d4
-Values must be plain numbers only.
+FORMAT: Use **bold text** for headers (NOT ### markdown). Use bullet points and numbered lists. Use markdown tables for data.
 
-FORMAT: **bold** key numbers (use bold headers not ### markdown headers), markdown tables, bullet points. Always include at least one chart.
+FEASIBILITY FORMULAS:
+- Buildable = Plot x FSI. Saleable = Buildable x 70% (freehold) / 55% (SRA) / 65% (MHADA)
+- Revenue = Saleable x Price PSF. Cost = Land + Construction + Approvals(10%) + Marketing(4%) + Finance(13%) + Contingency(5%)
+- Always show sensitivity: Base, Optimistic(+10%), Pessimistic(-10% price, -20% velocity)
 
-CONFIDENCE FRAMEWORK (apply dynamically to every response):
-- HIGH: Every number comes directly from the Neo4j query results. You are reporting/ranking/comparing explicit data.
-- MEDIUM: Base numbers from Neo4j + your calculations/projections/analytical frameworks on top.
-- LOW: Significant reasoning beyond the data (predictions, qualitative assessments).
-- DATA NOT AVAILABLE: The query asks about something not in the LF database. Known gaps: tower-level data, floor premiums, marketing spend, sales channels, discount tracking, pre-launch pricing. NEVER fabricate.
+STRESS TEST: When user mentions external factors (war, inflation, material costs):
+- If assumptions provided: rerun calculations with adjusted numbers, show ORIGINAL vs REVISED side by side
+- If not provided: ask for specific % assumptions before calculating
 
-TRANSPARENCY: Separate 'The data shows...' (direct) from 'Based on this, we can infer...' (derived).
+PROJECT-SPECIFIC: When data contains a matching project, report ALL metrics. When not found, say so and list available top projects.
+
+CONFIDENCE: HIGH=all from data. MEDIUM=data+calculations. LOW=inference beyond data. DATA NOT AVAILABLE=not in LF database.
 
 End EVERY response with:
 ---
 **Data Source:** Liases Foras Proprietary Research Database
-**Data Period:** [exact quarters/years referenced]
+**Data Period:** [exact quarters/years]
 **Confidence:** [HIGH/MEDIUM/LOW]
-**Basis:** [1-2 line explanation]"""
+**Basis:** [explanation]"""
 
 
 # ═══════════════════════════════════════
@@ -399,8 +412,19 @@ def health():
 
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    debug = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
-    print(f"MR&I API Server starting on port {port}")
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--port', type=int, default=5000)
+    parser.add_argument('--neo4j-uri', default=NEO4J_URI)
+    parser.add_argument('--neo4j-user', default=NEO4J_USER)
+    parser.add_argument('--neo4j-password', default=NEO4J_PASSWORD)
+    parser.add_argument('--anthropic-key', default=ANTHROPIC_KEY)
+    args = parser.parse_args()
+
+    NEO4J_URI = args.neo4j_uri
+    NEO4J_USER = args.neo4j_user
+    NEO4J_PASSWORD = args.neo4j_password
+    ANTHROPIC_KEY = args.anthropic_key
+
+    print(f"MR&I API Server starting on port {args.port}")
     print(f"Neo4j: {NEO4J_URI}")
-    app.run(host='0.0.0.0', port=port, debug=debug)
+    app.run(host='0.0.0.0', port=args.port, debug=True)
