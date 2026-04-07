@@ -1,10 +1,15 @@
 """
-MR&I — Pre-built Cypher Queries
-=================================
+MR&I — Pre-built Cypher Queries v2
+====================================
 Each query returns EXACT data from the graph. Claude uses these results
 for presentation only — it does NOT interpret raw JSON.
 
-Every number shown to the user traces back to a specific graph node/relationship.
+v2 CHANGES:
+- Micromarket queries now return INDIVIDUAL PROJECT data instead of
+  pre-computed averages (avg_price_psf, avg_velocity, demand_intensity).
+- This eliminates fabricated sector-level aggregates that the validation
+  layer was flagging.
+- Every number traces back to a specific Project node.
 """
 
 QUERIES = {
@@ -62,51 +67,96 @@ QUERIES = {
     """,
 
     # ═══════════════════════════════════════
-    # MICRO-MARKET RANKINGS
+    # MICRO-MARKET RANKINGS (PROJECT-LEVEL)
     # ═══════════════════════════════════════
+    # v2: Returns individual project data per micromarket.
+    # Claude must present projects individually — NEVER average them.
 
     "micromarkets_by_demand": """
         MATCH (c:City {name: $city})-[:HAS_MICROMARKET]->(m:MicroMarket)
         WHERE m.active_projects > 0
+        OPTIONAL MATCH (m)-[:HAS_PROJECT]->(p:Project)
+        WHERE p.status <> 'SOLD_OUT' AND p.annual_sales_units > 0
+        WITH m, p ORDER BY p.annual_sales_units DESC
+        WITH m,
+             count(p) AS active_projects,
+             m.sold_out_count AS sold_out_projects,
+             sum(p.annual_sales_units) AS total_annual_sales,
+             collect({
+               name: p.name,
+               builder: p.builder_name,
+               price_psf: p.saleable_rate_psf,
+               velocity: p.monthly_velocity,
+               annual_sales: p.annual_sales_units,
+               sold_pct: p.sold_pct,
+               months_inv: p.annual_months_inv,
+               supply: p.total_supply_units
+             })[0..5] AS top_projects
+        WHERE total_annual_sales > 0
         RETURN m.name AS micromarket,
-               m.active_projects AS projects,
-               m.total_annual_sales AS annual_sales,
-               m.demand_intensity AS demand_intensity,
-               m.avg_price_psf AS avg_price,
-               m.avg_velocity AS velocity,
-               m.avg_months_inv AS months_inv,
-               m.sold_out_count AS sold_out_projects
-        ORDER BY m.demand_intensity DESC
+               active_projects AS projects,
+               sold_out_projects,
+               total_annual_sales AS annual_sales,
+               top_projects
+        ORDER BY total_annual_sales DESC
     """,
 
     "micromarkets_by_inventory_risk": """
         MATCH (c:City {name: $city})-[:HAS_MICROMARKET]->(m:MicroMarket)
-        WHERE m.active_projects > 0 AND m.avg_months_inv > 0
+        WHERE m.active_projects > 0
+        OPTIONAL MATCH (m)-[:HAS_PROJECT]->(p:Project)
+        WHERE p.status <> 'SOLD_OUT' AND p.annual_months_inv > 0
+        WITH m, p ORDER BY p.annual_months_inv DESC
+        WITH m,
+             count(p) AS active_projects,
+             sum(p.annual_sales_units) AS total_annual_sales,
+             collect({
+               name: p.name,
+               builder: p.builder_name,
+               price_psf: p.saleable_rate_psf,
+               velocity: p.monthly_velocity,
+               months_inv: p.annual_months_inv,
+               sold_pct: p.sold_pct,
+               supply: p.total_supply_units
+             })[0..5] AS projects_by_risk
+        WHERE active_projects > 0
         RETURN m.name AS micromarket,
-               m.avg_months_inv AS months_inv,
-               m.active_projects AS projects,
-               m.avg_velocity AS velocity,
-               m.total_annual_sales AS annual_sales,
-               m.avg_price_psf AS avg_price,
+               active_projects AS projects,
+               total_annual_sales AS annual_sales,
+               projects_by_risk,
                CASE
-                 WHEN m.avg_months_inv > 24 THEN 'HIGH RISK'
-                 WHEN m.avg_months_inv > 18 THEN 'MODERATE'
+                 WHEN projects_by_risk[0].months_inv > 24 THEN 'HIGH RISK'
+                 WHEN projects_by_risk[0].months_inv > 18 THEN 'MODERATE'
                  ELSE 'HEALTHY'
                END AS risk_level
-        ORDER BY m.avg_months_inv DESC
+        ORDER BY projects_by_risk[0].months_inv DESC
     """,
 
     "emerging_micromarkets": """
         MATCH (c:City {name: $city})-[:HAS_MICROMARKET]->(m:MicroMarket)
         WHERE m.active_projects > 0
+        OPTIONAL MATCH (m)-[:HAS_PROJECT]->(p:Project)
+        WHERE p.status <> 'SOLD_OUT' AND p.monthly_velocity > 0
+        WITH m, p ORDER BY p.monthly_velocity DESC
+        WITH m,
+             count(p) AS active_projects,
+             m.sold_out_count AS sold_out_count,
+             sum(p.annual_sales_units) AS total_annual_sales,
+             collect({
+               name: p.name,
+               builder: p.builder_name,
+               price_psf: p.saleable_rate_psf,
+               velocity: p.monthly_velocity,
+               annual_sales: p.annual_sales_units,
+               sold_pct: p.sold_pct
+             })[0..5] AS fastest_projects
+        WHERE active_projects > 0
         RETURN m.name AS micromarket,
-               m.active_projects AS active_projects,
-               m.sold_out_count AS sold_out_count,
-               m.avg_velocity AS velocity,
-               m.avg_price_psf AS avg_price,
-               m.total_annual_sales AS annual_sales,
-               m.demand_intensity AS demand_intensity
-        ORDER BY m.avg_velocity DESC
+               active_projects,
+               sold_out_count,
+               total_annual_sales AS annual_sales,
+               fastest_projects
+        ORDER BY fastest_projects[0].velocity DESC
     """,
 
     # ═══════════════════════════════════════
@@ -229,7 +279,7 @@ QUERIES = {
     """,
 
     # ═══════════════════════════════════════
-    # SITE INTELLIGENCE
+    # SITE INTELLIGENCE (PROJECT-LEVEL)
     # ═══════════════════════════════════════
 
     "micromarket_detail": """
@@ -237,38 +287,52 @@ QUERIES = {
         WHERE m.name CONTAINS $location OR m.raw_name CONTAINS $location
         OPTIONAL MATCH (m)-[:HAS_PROJECT]->(p:Project)
         WITH m, p ORDER BY p.annual_sales_units DESC
+        WITH m,
+             m.active_projects AS total_active,
+             m.sold_out_count AS sold_out,
+             m.min_price_psf AS min_price,
+             m.max_price_psf AS max_price,
+             collect({
+               name: p.name,
+               builder: p.builder_name,
+               price_psf: p.saleable_rate_psf,
+               carpet_price: p.carpet_rate_psf,
+               velocity: p.monthly_velocity,
+               annual_sales: p.annual_sales_units,
+               annual_value_cr: p.annual_sales_value_cr,
+               sold_pct: p.sold_pct,
+               unsold_pct: p.unsold_pct,
+               status: p.status,
+               supply: p.total_supply_units,
+               months_inv: p.annual_months_inv,
+               months_inv_qtr: p.quarterly_months_inv,
+               launch_date: p.launch_date,
+               possession_date: p.possession_date,
+               rera: p.rera_registered
+             }) AS projects
         RETURN m.name AS micromarket,
-               m.active_projects AS total_active,
-               m.sold_out_count AS sold_out,
-               m.avg_price_psf AS avg_price,
-               m.min_price_psf AS min_price,
-               m.max_price_psf AS max_price,
-               m.avg_velocity AS avg_velocity,
-               m.avg_months_inv AS avg_months_inv,
-               m.demand_intensity AS demand_intensity,
-               collect({
-                 name: p.name,
-                 builder: p.builder_name,
-                 price: p.saleable_rate_psf,
-                 velocity: p.monthly_velocity,
-                 sales: p.annual_sales_units,
-                 sold_pct: p.sold_pct,
-                 status: p.status,
-                 supply: p.total_supply_units,
-                 months_inv: p.annual_months_inv
-               }) AS projects
+               total_active,
+               sold_out,
+               min_price,
+               max_price,
+               projects
     """,
 
     "nearby_micromarkets": """
         MATCH (c:City {name: $city})-[:HAS_MICROMARKET]->(m:MicroMarket)
         WHERE m.active_projects > 0
+        OPTIONAL MATCH (m)-[:HAS_PROJECT]->(p:Project)
+        WHERE p.status <> 'SOLD_OUT' AND p.saleable_rate_psf > 0
+        WITH m, count(p) AS active_projects,
+             sum(p.annual_sales_units) AS total_sales,
+             min(p.saleable_rate_psf) AS min_price,
+             max(p.saleable_rate_psf) AS max_price
         RETURN m.name AS micromarket,
-               m.avg_price_psf AS avg_price,
-               m.avg_velocity AS velocity,
-               m.avg_months_inv AS months_inv,
-               m.active_projects AS projects,
-               m.demand_intensity AS demand
-        ORDER BY m.avg_price_psf DESC
+               min_price,
+               max_price,
+               active_projects AS projects,
+               total_sales AS annual_sales
+        ORDER BY total_sales DESC
     """,
 
     # ═══════════════════════════════════════
@@ -289,13 +353,22 @@ QUERIES = {
     """,
 
     # ═══════════════════════════════════════
-    # VALIDATION QUERY (returns data lineage)
+    # VALIDATION QUERY
     # ═══════════════════════════════════════
 
-
+    "validate_number": """
+        // Use this to verify any specific number
+        MATCH (p:Project {name: $project_name, city: $city})
+        RETURN p.name AS project,
+               p.data_source AS source_section,
+               p.annual_sales_units AS annual_sales,
+               p.saleable_rate_psf AS price_psf,
+               p.monthly_velocity AS velocity,
+               p.quarterly_months_inv AS months_inv
+    """,
 
     # ═══════════════════════════════════════
-    # BUYER DEMOGRAPHICS (Hinjewadi)
+    # BUYER DEMOGRAPHICS
     # ═══════════════════════════════════════
 
     "buyer_age_dist": """
@@ -358,16 +431,6 @@ QUERIES = {
                r.months_inventory AS months_inv,
                r.sales_velocity_pct AS velocity
         ORDER BY f.id
-    """,
-    "validate_number": """
-        // Use this to verify any specific number
-        MATCH (p:Project {name: $project_name, city: $city})
-        RETURN p.name AS project,
-               p.data_source AS source_section,
-               p.annual_sales_units AS annual_sales,
-               p.saleable_rate_psf AS price_psf,
-               p.monthly_velocity AS velocity,
-               p.quarterly_months_inv AS months_inv
     """,
 }
 
