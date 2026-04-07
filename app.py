@@ -1,20 +1,20 @@
 """
-MR&I API Backend
-=================
+MR&I API Backend v2
+====================
 Flask server bridging the HTML frontend, Neo4j graph, and Claude API.
+Now with Web Intelligence integration via Anthropic web_search tool.
 
 Architecture:
-  User query → classify intent → run Cypher query → get EXACT data → 
-  send data + query to Claude → Claude presents (does NOT interpret raw JSON)
+  User query → classify intent → run Cypher query → get EXACT data →
+  detect if web context needed → send data + query to Claude (with web_search tool if needed) →
+  Claude presents data + web context → stream response back
 
-Usage:
-  python api_server.py --neo4j-uri bolt://localhost:7687 --neo4j-password <pwd> --anthropic-key <key>
-
-  Or with env vars:
-  export NEO4J_URI=bolt://localhost:7687
-  export NEO4J_PASSWORD=your_password  
-  export ANTHROPIC_API_KEY=sk-ant-...
-  python api_server.py
+Changes from v1:
+  - Web intelligence: web_search tool enabled for macro/policy/infrastructure queries
+  - Micro-market mapping: corridor names → constituent sectors
+  - Updated system prompt: no "data not available", no Neo4j branding
+  - Anti-fabrication rules strengthened
+  - Streaming handles web_search_tool_result events
 """
 
 import os
@@ -48,7 +48,7 @@ CORS(app)
 NEO4J_URI = os.environ.get('NEO4J_URI', 'neo4j+s://c26f3089.databases.neo4j.io')
 NEO4J_USER = os.environ.get('NEO4J_USER', 'c26f3089')
 NEO4J_PASSWORD = os.environ.get('NEO4J_PASSWORD', 'X_EaaI8F3BXe3YGBP8k9jAJTN28W_QvnGSgCjvELaTY')
-ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')  # Pass via --anthropic-key or env var
+ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 
 driver = None
 claude = None
@@ -58,7 +58,7 @@ def get_driver():
     global driver
     if driver is None:
         driver = GraphDatabase.driver(
-            NEO4J_URI, 
+            NEO4J_URI,
             auth=(NEO4J_USER, NEO4J_PASSWORD),
             max_connection_lifetime=300,
             max_connection_pool_size=10,
@@ -91,14 +91,77 @@ def run_query(query_name, **params):
         print(f"  ✗ Query {query_name} failed: {e}")
         return {"error": str(e), "query": query_name, "row_count": 0, "data": [], "source": "error"}
 
-    # Attach data lineage
     return {
         "query": query_name,
         "params": params,
         "row_count": len(records),
         "data": records,
-        "source": "LF_database_via_neo4j"
+        "source": "LF_Research_Database"
     }
+
+
+# ═══════════════════════════════════════
+# WEB INTELLIGENCE DETECTION
+# ═══════════════════════════════════════
+WEB_KEYWORDS = re.compile(
+    r'repo.rate|rbi|interest.rate|infra|metro|express|highway|airport|policy|'
+    r'stamp.duty|rera|government|budget|gdp|inflation|macro|economic|news|recent|'
+    r'current.market|trend.2026|trend.2025|regulation|nirmala|fm |union.budget|'
+    r'pmay|pradhan|rate.cut|rate.hike|what.if|impact.of|how.will|forecast|predict|'
+    r'outlook|developer.*earn|earnings.call|land.deal|acquisition.*land|'
+    r'rental.yield|rent.trend|connectivity|dwarka|appreciation|capital.gain|'
+    r'corridor|upcoming|under.construction|completion|timeline',
+    re.IGNORECASE
+)
+
+# ═══════════════════════════════════════
+# CORRIDOR → SECTOR MAPPING
+# ═══════════════════════════════════════
+CORRIDOR_MAP = {
+    r'dwarka|dxp|dwarka.express': [
+        'Sector 37D', 'Sector - 99', 'Sector 102', 'Sector 103',
+        'Sector - 104', 'Sector 108', 'Sector 109', 'Sector - 110',
+        'Sector - 111', 'Sector - 112'
+    ],
+    r'sohna|sohna.road|sohna.corridor': [
+        'Sohna Road', 'Sector 2 , Sohna', 'Sector - 4, Sohna',
+        'Sector - 5, Sohna', 'Sector - 6, Sohna', 'Sector 33, Sohna',
+        'Sector 35, Sohna', 'Sector 36, Sohna'
+    ],
+    r'golf.course.extension|gcer': [
+        'Sector 58', 'Sector 59', 'Sector 61', 'Sector 62',
+        'Sector 63', 'Sector - 63A', 'Sector 65', 'Sector 66'
+    ],
+    r'golf.course.road|gcr(?!.*ext)': [
+        'Sector 42', 'Sector 53', 'Sector 54', 'Sector 65'
+    ],
+    r'southern.peripheral|spr': [
+        'Sector - 68', 'Sector 69', 'Sector 70', 'Sector 70A',
+        'Sector 71', 'Sector 72', 'Sector 76', 'Sector 77',
+        'Sector 78', 'Sector 79', 'Sector - 79 B'
+    ],
+    r'new.gurgaon': [
+        'Sector 76', 'Sector 79', 'Sector 80', 'Sector - 81',
+        'Sector 82', 'Sector 83', 'Sector 84', 'Sector 85',
+        'Sector 86', 'Sector 88A', 'Sector 88B', 'Sector 89',
+        'Sector 89A', 'Sector 90', 'Sector 91', 'Sector 92',
+        'Sector 93', 'Sector 95'
+    ]
+}
+
+
+def detect_corridor(query):
+    """Detect if query references a corridor and return matching sector patterns."""
+    q = query.lower()
+    for pattern, sectors in CORRIDOR_MAP.items():
+        if re.search(pattern, q):
+            return sectors
+    return None
+
+
+def needs_web(query):
+    """Detect if query needs web intelligence."""
+    return bool(WEB_KEYWORDS.search(query or ""))
 
 
 # ═══════════════════════════════════════
@@ -108,6 +171,25 @@ def classify_intent(query, city):
     """Map user query to appropriate Cypher queries."""
     q = query.lower()
     results = []
+
+    # Check for corridor queries first
+    corridor_sectors = detect_corridor(query)
+    if corridor_sectors:
+        # For corridor queries, get micromarket details for each constituent sector
+        for sector_pattern in corridor_sectors:
+            # Extract just the sector identifier for the location param
+            loc = sector_pattern.replace('Sector ', '').replace('Sector - ', '')
+            result = run_query("micromarket_detail", city=city, location=sector_pattern.split(',')[0])
+            if result.get('row_count', 0) > 0:
+                results.append(result)
+
+        # Also get market overview and price trends for context
+        results.append(run_query("market_overview", city=city))
+        results.append(run_query("price_trend_saleable", city=city))
+        # Cap corridor results
+        if len(results) > 5:
+            results = results[:5]
+        return results
 
     # Market overview
     if re.search(r'market|overview|summary|health.check|how.*market', q):
@@ -123,7 +205,7 @@ def classify_intent(query, city):
         results.append(run_query("quarterly_absorption", city=city))
 
     # Micro-market ranking by demand
-    if re.search(r'rank.*demand|demand.*intens|micro.*market.*demand', q):
+    if re.search(r'rank.*demand|demand.*intens|micro.*market.*demand|hotspot|hot.spot|acquisition|acqui', q):
         results.append(run_query("micromarkets_by_demand", city=city))
 
     # Micro-market ranking by inventory risk
@@ -158,17 +240,33 @@ def classify_intent(query, city):
         results.append(run_query("price_trend_saleable", city=city))
         results.append(run_query("flat_performance", city=city))
 
-    # Project-specific query — extract project name and search
-    # Match patterns like "performance of X", "about X", "X project", "X by builder"
-    project_match = re.search(r'(?:performance|summary|details?|about|analyse|analyze|report)\s+(?:of\s+|for\s+)?(.+?)(?:\s+in\s+|\s+at\s+|$)', query, re.I)
+    # Infrastructure impact — get market data + micromarket rankings
+    if re.search(r'infra.*impact|impact.*zone|metro.*impact|express.*impact|connectivity', q):
+        results.append(run_query("market_overview", city=city))
+        results.append(run_query("annual_overview", city=city))
+        results.append(run_query("micromarkets_by_demand", city=city))
+        results.append(run_query("price_trend_saleable", city=city))
+
+    # Project-specific query
+    project_match = re.search(
+        r'(?:performance|summary|details?|about|analyse|analyze|report)\s+(?:of\s+|for\s+)?(.+?)(?:\s+in\s+|\s+at\s+|$)',
+        query, re.I
+    )
     if not project_match:
-        project_match = re.search(r'(?:give|show|get)\s+(?:me\s+)?(?:.*?)\s+(?:of|for)\s+(.+?)(?:\s+in\s+|\s+at\s+|$)', query, re.I)
-    
+        project_match = re.search(
+            r'(?:give|show|get)\s+(?:me\s+)?(?:.*?)\s+(?:of|for)\s+(.+?)(?:\s+in\s+|\s+at\s+|$)',
+            query, re.I
+        )
+
     if project_match:
         proj_name = project_match.group(1).strip().rstrip('.')
-        # Clean up city name from project name
-        proj_name = re.sub(r'\s*(?:in|at)\s+(?:gurgaon|gurugram|kolkata|hinjewadi|pune|mumbai).*$', '', proj_name, flags=re.I).strip()
-        if len(proj_name) > 3 and not re.match(r'^(market|city|area|location|sector|residential|overview)$', proj_name, re.I):
+        proj_name = re.sub(
+            r'\s*(?:in|at)\s+(?:gurgaon|gurugram|kolkata|hinjewadi|pune|mumbai).*$',
+            '', proj_name, flags=re.I
+        ).strip()
+        if len(proj_name) > 3 and not re.match(
+            r'^(market|city|area|location|sector|residential|overview)$', proj_name, re.I
+        ):
             results.append(run_query("project_detail", city=city, project_name=proj_name))
             results.append(run_query("project_competitors", city=city, project_name=proj_name))
 
@@ -220,16 +318,16 @@ def classify_intent(query, city):
     if re.search(r'best.*sell|top.*config|popular.*bhk|fast.*mov|high.*demand', q):
         results.append(run_query("flat_performance", city=city))
 
-    # Residential overview (matches the chip exactly)
+    # Residential overview
     if re.search(r'residential|overview.*residential', q):
         results.append(run_query("market_overview", city=city))
         results.append(run_query("annual_overview", city=city))
         results.append(run_query("price_trend_saleable", city=city))
         results.append(run_query("flat_performance", city=city))
 
-    # Cap at 3 queries max to prevent timeout
-    if len(results) > 3:
-        results = results[:3]
+    # Cap at 4 queries max to prevent timeout (raised from 3 for richer responses)
+    if len(results) > 4:
+        results = results[:4]
 
     # Default: market overview
     if not results:
@@ -242,49 +340,108 @@ def classify_intent(query, city):
 # ═══════════════════════════════════════
 # SYSTEM PROMPT
 # ═══════════════════════════════════════
-SYSTEM_PROMPT = """You are MR&I (Market Research & Intelligence), a precision real estate analytics engine.
+SYSTEM_PROMPT_BASE = """You are MR&I (Market Research & Intelligence), a precision real estate analytics engine for Indian residential markets.
 
-ABSOLUTE RULES (NEVER VIOLATE):
-1. EVERY number you present MUST come from the data provided below. ZERO exceptions.
-2. If a number is not in the data, say 'Data not available' — NEVER estimate or fabricate.
-3. NEVER reference future years beyond the latest quarter in the data. If data ends at Q3 25-26, you CANNOT state anything about 2027, 2028 as fact.
+=== ABSOLUTE RULES (NEVER VIOLATE) ===
+1. EVERY number you present MUST come from the provided data. ZERO exceptions.
+2. If a specific metric is not in the data, present the CLOSEST AVAILABLE data and clearly label what it represents. For example, if asked about 'Dwarka Expressway' and you have data for constituent sectors (37D, 99, 102, 103, 104) — present those projects grouped by sector. NEVER leave the user with just 'data not available'. NEVER output 'CRITICAL DATA LIMITATION' or 'Data Not Available' as a section header.
+3. NEVER reference future years beyond the latest quarter in the data.
 4. NEVER fabricate project names, builder names, or locations not in the data.
 5. When recommending strategies — frame as 'recommendations based on current data' NOT predictions.
-6. Use Indian formatting: Rs., Lakhs, Crores, PSF.
+6. Use Indian formatting: Rs., Lakhs, Crores, PSF. Not ₹ symbol.
 7. Clearly separate 'The data shows...' (fact) from 'Based on this, we can infer...' (analysis).
 
-CHART RULES (CRITICAL):
-- NEVER combine metrics with different scales on same chart (Sales in thousands + MI in single digits = WRONG)
-- Use SEPARATE charts for metrics with different magnitudes
+=== MICRO-MARKET MAPPING (CRITICAL) ===
+Users often query by corridor names, not sector numbers. Map these to constituent sectors:
+- Dwarka Expressway (DXP) = Sectors 37D, 99, 102, 103, 104, 108, 109, 110, 111, 112, 113
+- Sohna Road / Sohna Corridor = Sectors 2-6 Sohna, Sector 33-36 Sohna, Sohna Road
+- Golf Course Road / GCR = Sectors 42, 43, 53, 54, 55, 56, 57, 65
+- Golf Course Extension Road = Sectors 58, 59, 61, 62, 63, 63A, 65, 66
+- Southern Peripheral Road (SPR) = Sectors 68, 69, 70, 70A, 71, 72, 76, 77, 78, 79, 79B
+- New Gurgaon = Sectors 76, 79, 80, 81, 82, 83, 84, 85, 86, 88A, 88B, 89, 89A, 90, 91, 92, 93, 95
+
+When a user asks about a corridor:
+1. Identify ALL sectors that map to it from the data
+2. List individual projects from those sectors with their EXACT metrics
+3. Show a project-level comparison table — NEVER average across projects to create a 'sector price'
+4. If web intelligence is active, use web search to add infrastructure context
+
+=== GLOSSARY (use these exact definitions) ===
+- Marketable Supply = Sales + Unsold (total active stock)
+- Months Inventory (MI) = Unsold / Monthly Sales. HEALTHY: <18. MODERATE: 18-24. OVERSUPPLIED: >24
+- Sales Velocity = % of supply sold per month. STRONG: >3%. MODERATE: 2-3%. WEAK: <2%
+- Absorption Price = Weighted avg price of actually transacted units
+- Product Efficiency = Sales-to-supply ratio (higher = better selling product)
+
+=== CHART RULES (CRITICAL) ===
+- Format: <lfchart type="bar|line|doughnut|hbar|combo" title="Title"><labels>L1,L2</labels><dataset label="Name" color="#hex">v1,v2</dataset></lfchart>
+- Colors: #c9a84c(gold) #3b82f6(blue) #22c55e(green) #ef4444(red) #8b5cf6(purple) #06b6d4(cyan)
+- Values must be plain numbers only. No text, no symbols, no Rs.
+- NEVER combine metrics with different scales on same chart unless using combo type
 - Chart title: use 'and' not '&' (causes rendering issues)
-- Format: <lfchart type="bar|line|doughnut|hbar" title="Title"><labels>L1,L2</labels><dataset label="Name" color="#hex">v1,v2</dataset></lfchart>
-- Colors: #c9a84c #3b82f6 #22c55e #ef4444 #8b5cf6 #06b6d4
-- Values must be plain numbers only
+- For combo charts: <dataset label="Volume" color="#3b82f6" type="bar" axis="left">...</dataset><dataset label="Rate %" color="#ef4444" type="line" axis="right">...</dataset>
+- CHART LABEL FORMATTING: labels must be SHORT — use "Q1 24-25" not "Quarter 1 FY2024-25", use "3-3.5K" not "Rs 3001 - Rs 3500"
+- Max 8-10 labels per chart. Show top entries only if more exist.
 
-FORMAT: Use **bold text** for headers (NOT ### markdown). Use bullet points and numbered lists. Use markdown tables for data.
+ABSOLUTE BAN ON FABRICATED AGGREGATIONS:
+a) NEVER average project-level data to create sector-level metrics. If Sector 71 has Birla Pravaah (492 units) and Signature Global Titanium (702 units), NEVER report "Sector 71: 597 demand intensity" — list each project individually.
+b) In charts: every value must exist in the raw data or be a simple YoY/QoQ % from two data points.
+c) The validation layer flags every unverified chart value. Unverified values damage credibility.
 
-FEASIBILITY FORMULAS:
-- Buildable = Plot x FSI. Saleable = Buildable x 70% (freehold) / 55% (SRA) / 65% (MHADA)
+=== FORMAT RULES ===
+- Use **bold text** for section headers, NOT ### markdown headers
+- Use bullet points for insights, numbered lists for rankings
+- Use markdown tables for structured comparisons
+- Keep paragraphs concise — 2-3 sentences max per point
+
+=== ANALYSIS MODES ===
+
+**MARKET OVERVIEW:** Report supply, sales, unsold, MI, velocity, pricing from quarterly and annual data.
+
+**PRODUCT MIX:** For each BHK type: annual sales, unsold, velocity, MI, efficiency. Recommend based on HIGHEST velocity + LOWEST MI.
+
+**COMPETITIVE BENCHMARK:** Compare projects using exact data. Rank by composite score.
+
+**LAND FEASIBILITY:**
+- Buildable = Plot x FSI. Saleable = Buildable x Efficiency (70% freehold, 55% SRA, 65% MHADA)
 - Revenue = Saleable x Price PSF. Cost = Land + Construction + Approvals(10%) + Marketing(4%) + Finance(13%) + Contingency(5%)
 - Always show sensitivity: Base, Optimistic(+10%), Pessimistic(-10% price, -20% velocity)
 
-STRESS TEST: When user mentions external factors (war, inflation, material costs):
-- If assumptions provided: rerun calculations with adjusted numbers, show ORIGINAL vs REVISED side by side
-- If not provided: ask for specific % assumptions before calculating
+**SITE INTELLIGENCE:** Score on 5 parameters (1-10). Compare with nearby projects. GO/CONDITIONAL GO/NO-GO verdict.
 
-PROJECT-SPECIFIC: When data contains a matching project, report ALL metrics. When not found, say so and list available top projects.
-
-CONFIDENCE: HIGH=all from data. MEDIUM=data+calculations. LOW=inference beyond data. DATA NOT AVAILABLE=not in LF database.
-
-MANDATORY: You MUST include at least one <lfchart> in EVERY response. No exceptions. If you write a response without a chart, it is incomplete. Use this exact format:
-<lfchart type="bar" title="Example Title"><labels>Label1,Label2,Label3</labels><dataset label="Series Name" color="#3b82f6">100,200,300</dataset></lfchart>
+MANDATORY: Include at least one <lfchart> in EVERY response.
 
 End EVERY response with:
 ---
 **Data Source:** Liases Foras Proprietary Research Database
 **Data Period:** [exact quarters/years]
-**Confidence:** [HIGH/MEDIUM/LOW]
-**Basis:** [explanation]"""
+**City:** [city name]
+**Confidence:** [HIGH / MEDIUM / LOW]
+**Basis:** [explanation referencing LF Knowledge Base]"""
+
+SYSTEM_PROMPT_WEB_ADDENDUM = """
+
+=== WEB INTELLIGENCE MODE (ACTIVE) ===
+You have access to the web_search tool for this query. Use it to fetch CURRENT context — RBI policy rates, infrastructure announcements, government policy changes, developer news, macro-economic data.
+
+CRITICAL RULES FOR WEB INTELLIGENCE:
+1. LF DATA IS THE BACKBONE. Web data provides CONTEXT, not replacement. Every core metric (sales, supply, price, velocity, MI) MUST come from the LF database. Web data adds the 'why' and 'what next'.
+2. NEVER mix web-sourced numbers into LF data tables or charts. Charts must ONLY contain LF database values.
+3. CLEARLY SEPARATE sources:
+   - For LF data insights: state them normally (this is the default)
+   - For web-sourced context: prefix with [Web Context] and cite the source
+   - Example: '[Web Context] RBI cut the repo rate by 25bps to 6.0% in April 2025 (Source: RBI.org.in). Based on LF data, Gurgaon velocity is already at 4.76% — this rate cut could accelerate absorption further.'
+4. In the source citation footer, add a separate WEB SOURCES section listing each web source used with its URL.
+5. Use web search for: current repo rate, recent infrastructure news for the city, any policy changes affecting real estate, developer earnings if asked, recent land deals.
+6. Do NOT use web search to find property data that contradicts or supplements LF data. If web says Gurgaon avg price is Rs.25,000 PSF but LF data says Rs.20,981 — use LF data and note the difference if relevant.
+7. Maximum 3 web searches per response. Be targeted."""
+
+
+def get_system_prompt(with_web=False):
+    """Build system prompt, optionally with web intelligence rules."""
+    if with_web:
+        return SYSTEM_PROMPT_BASE + SYSTEM_PROMPT_WEB_ADDENDUM
+    return SYSTEM_PROMPT_BASE
 
 
 # ═══════════════════════════════════════
@@ -310,9 +467,14 @@ def handle_query():
         print(f"Neo4j query failed: {e}")
         return jsonify({"error": f"Database connection issue: {str(e)}. Please try again."}), 503
 
-    # Step 2: Format data for Claude
+    # Step 2: Detect if web intelligence is needed
+    web_mode = needs_web(user_query)
+    if web_mode:
+        print(f"  🌐 Web intelligence activated for: {user_query[:60]}...")
+
+    # Step 3: Format data for Claude
     data_text = f"CITY: {city}\n\n"
-    data_text += "DATA LINEAGE: Every row below was queried directly from the Neo4j knowledge graph built from Liases Foras proprietary Excel data. Row counts and query names are provided for traceability.\n\n"
+    data_text += "DATA LINEAGE: Every row below was queried directly from the LF Knowledge Base built from Liases Foras proprietary research data. Row counts and query names are provided for traceability.\n\n"
     queries_used = []
     total_rows = 0
     for result in data_results:
@@ -323,32 +485,62 @@ def handle_query():
         data_text += f"--- {result['query']} ({result['row_count']} rows, source: {result['source']}) ---\n"
         data_text += json.dumps(result['data'], indent=1, default=str)
         data_text += "\n\n"
-    data_text += f"TOTAL: {len(queries_used)} queries executed, {total_rows} rows returned from Neo4j.\n"
+    data_text += f"TOTAL: {len(queries_used)} queries executed, {total_rows} rows returned from LF Knowledge Base.\n"
     data_text += f"QUERIES USED: {', '.join(queries_used)}\n"
 
-    # Step 3: Build messages
+    # Detect corridor context and add mapping hint
+    corridor_sectors = detect_corridor(user_query)
+    if corridor_sectors:
+        corridor_name = user_query  # Will be parsed by Claude from context
+        data_text += f"\nCORRIDOR MAPPING: The query references a corridor. Constituent sectors searched: {', '.join(corridor_sectors)}\n"
+        data_text += "Present data grouped by sector with individual project metrics. Do NOT average across projects.\n"
+
+    # Step 4: Build messages
     messages = []
     for h in history[-6:]:
         messages.append({"role": h["role"], "content": h["content"]})
     messages.append({
         "role": "user",
-        "content": f"VERIFIED DATA FROM NEO4J:\n{data_text}\n\nUSER QUESTION: {user_query}"
+        "content": f"VERIFIED DATA FROM LF KNOWLEDGE BASE:\n{data_text}\n\nUSER QUESTION: {user_query}"
     })
 
-    # Step 4: Call Claude
+    # Step 5: Build Claude API call params
+    system_prompt = get_system_prompt(with_web=web_mode)
     client = get_claude()
 
+    api_params = {
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 4000,
+        "system": system_prompt,
+        "messages": messages,
+    }
+
+    # Add web search tool if needed
+    if web_mode:
+        api_params["tools"] = [
+            {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
+        ]
+
+    # Step 6: Call Claude
     if stream:
         def generate():
-            with client.messages.stream(
-                model="claude-sonnet-4-20250514",
-                max_tokens=4000,
-                system=SYSTEM_PROMPT,
-                messages=messages,
-            ) as s:
-                for text in s.text_stream:
-                    yield f"data: {json.dumps({'type': 'text', 'text': text})}\n\n"
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            try:
+                with client.messages.stream(**api_params) as s:
+                    for event in s:
+                        # Handle different event types
+                        if hasattr(event, 'type'):
+                            if event.type == 'content_block_start':
+                                block = getattr(event, 'content_block', None)
+                                if block and getattr(block, 'type', '') == 'web_search_tool_result':
+                                    yield f"data: {json.dumps({'type': 'web_hint', 'text': 'Processing web results...'})}\n\n"
+                            elif event.type == 'content_block_delta':
+                                delta = getattr(event, 'delta', None)
+                                if delta and getattr(delta, 'type', '') == 'text_delta':
+                                    yield f"data: {json.dumps({'type': 'text', 'text': delta.text})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'web_mode': web_mode})}\n\n"
+            except Exception as e:
+                print(f"  ✗ Claude streaming error: {e}")
+                yield f"data: {json.dumps({'type': 'error', 'text': str(e)})}\n\n"
 
         return Response(
             stream_with_context(generate()),
@@ -356,16 +548,18 @@ def handle_query():
             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
         )
     else:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=4000,
-            system=SYSTEM_PROMPT,
-            messages=messages,
-        )
+        response = client.messages.create(**api_params)
+        # Extract text from potentially mixed content blocks (text + web_search results)
+        response_text = ""
+        for block in response.content:
+            if hasattr(block, 'text'):
+                response_text += block.text
+
         return jsonify({
-            "response": response.content[0].text,
+            "response": response_text,
             "data_queries": [r["query"] for r in data_results],
             "total_rows": sum(r["row_count"] for r in data_results),
+            "web_mode": web_mode,
         })
 
 
@@ -428,6 +622,7 @@ if __name__ == '__main__':
     NEO4J_PASSWORD = args.neo4j_password
     ANTHROPIC_KEY = args.anthropic_key
 
-    print(f"MR&I API Server starting on port {args.port}")
+    print(f"MR&I API Server v2 starting on port {args.port}")
     print(f"Neo4j: {NEO4J_URI}")
+    print(f"Web Intelligence: enabled")
     app.run(host='0.0.0.0', port=args.port, debug=True)

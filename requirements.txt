@@ -1,5 +1,5 @@
 flask>=3.0.0
 flask-cors>=4.0.0
 neo4j>=5.0.0
-anthropic>=0.30.0
+anthropic>=0.42.0
 gunicorn>=21.0.0
