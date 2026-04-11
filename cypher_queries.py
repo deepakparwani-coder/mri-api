@@ -202,8 +202,8 @@ QUERIES = {
                p.launch_date AS launch,
                p.possession_date AS possession,
                p.rera_registered AS rera,
-               b.project_count AS builder_total_projects,
-               b.avg_velocity AS builder_avg_velocity
+               b.project_count AS builder_total_projects
+
     """,
 
     "project_competitors": """
@@ -431,6 +431,129 @@ QUERIES = {
                r.months_inventory AS months_inv,
                r.sales_velocity_pct AS velocity
         ORDER BY f.id
+    """,
+
+    # ═══════════════════════════════════════
+    # CONSTRUCTION STAGE ANALYSIS
+    # ═══════════════════════════════════════
+
+    "annual_sales_stage": """
+        MATCH (c:City {name: $city})-[r:ANNUAL_SALES_STAGE]->(f:FiscalYear)
+        RETURN f.id AS fiscal_year,
+               r.stage AS construction_stage,
+               r.supply_units AS supply,
+               r.sales_units AS sales,
+               r.unsold_units AS unsold,
+               r.months_inventory AS months_inv,
+               r.sales_velocity_pct AS velocity
+        ORDER BY f.id, r.stage
+    """,
+
+    "unsold_by_stage": """
+        MATCH (c:City {name: $city})-[r:UNSOLD_STAGE]->(q:Quarter)
+        RETURN q.label AS quarter,
+               r.stage AS construction_stage,
+               r.unsold_units AS unsold,
+               r.months_inventory AS months_inv
+        ORDER BY q.sort_order, r.stage
+    """,
+
+    # ═══════════════════════════════════════
+    # POSSESSION & DISTANCE
+    # ═══════════════════════════════════════
+
+    "possession_distribution": """
+        MATCH (c:City {name: $city})-[r:POSSESSION_DIST]->(c)
+        RETURN r.possession_year AS possession_year,
+               r.supply_units AS supply,
+               r.sales_units AS sales,
+               r.unsold_units AS unsold,
+               r.sales_velocity_pct AS velocity
+        ORDER BY r.possession_year
+    """,
+
+    "distance_analysis": """
+        MATCH (c:City {name: $city})-[r:DISTANCE_RANGE]->(c)
+        RETURN r.distance_range AS distance_km,
+               r.projects AS projects,
+               r.supply_units AS supply,
+               r.sales_units AS sales,
+               r.unsold_units AS unsold,
+               r.avg_price_psf AS avg_price
+        ORDER BY r.distance_range
+    """,
+
+    # ═══════════════════════════════════════
+    # NEW LAUNCHES & SOLD OUT
+    # ═══════════════════════════════════════
+
+    "new_launches": """
+        MATCH (p:Project {city: $city})
+        WHERE p.is_new_launch = true OR p.launch_date CONTAINS '2024' OR p.launch_date CONTAINS '2025'
+        OPTIONAL MATCH (m:MicroMarket)-[:HAS_PROJECT]->(p)
+        RETURN p.name AS project,
+               p.builder_name AS builder,
+               m.name AS micromarket,
+               p.launch_date AS launch_date,
+               p.total_supply_units AS supply,
+               p.saleable_rate_psf AS price_psf,
+               p.monthly_velocity AS velocity,
+               p.sold_pct AS sold_pct
+        ORDER BY p.launch_date DESC
+        LIMIT 20
+    """,
+
+    "sold_out_projects": """
+        MATCH (p:Project {city: $city, status: 'SOLD_OUT'})
+        OPTIONAL MATCH (m:MicroMarket)-[:HAS_PROJECT]->(p)
+        RETURN p.name AS project,
+               p.builder_name AS builder,
+               m.name AS micromarket,
+               p.total_supply_units AS supply,
+               p.saleable_rate_psf AS price_psf,
+               p.launch_date AS launch_date,
+               p.possession_date AS possession
+        ORDER BY p.total_supply_units DESC
+    """,
+
+    # ═══════════════════════════════════════
+    # COMPARABLE & CATCHMENT
+    # ═══════════════════════════════════════
+
+    "comparable_projects": """
+        MATCH (p1:Project {city: $city})-[:COMPETES_WITH]-(p2:Project)
+        OPTIONAL MATCH (m1:MicroMarket)-[:HAS_PROJECT]->(p1)
+        OPTIONAL MATCH (m2:MicroMarket)-[:HAS_PROJECT]->(p2)
+        RETURN p1.name AS project,
+               m1.name AS micromarket,
+               p1.saleable_rate_psf AS price_psf,
+               p1.monthly_velocity AS velocity,
+               collect({
+                 name: p2.name,
+                 micromarket: m2.name,
+                 price_psf: p2.saleable_rate_psf,
+                 velocity: p2.monthly_velocity,
+                 sold_pct: p2.sold_pct
+               })[0..5] AS comparables
+        ORDER BY p1.annual_sales_units DESC
+        LIMIT 10
+    """,
+
+    "catchment_projects": """
+        MATCH (c:City {name: $city})-[:HAS_MICROMARKET]->(m:MicroMarket)
+        OPTIONAL MATCH (m)-[:HAS_PROJECT]->(p:Project)
+        WHERE p.status <> 'SOLD_OUT' AND p.annual_sales_units > 0
+        WITH m, count(p) AS projects,
+             sum(p.annual_sales_units) AS total_sales,
+             sum(p.total_supply_units) AS total_supply,
+             avg(p.saleable_rate_psf) AS avg_price
+        WHERE projects > 0
+        RETURN m.name AS micromarket,
+               projects,
+               total_sales,
+               total_supply,
+               round(avg_price) AS avg_price_psf
+        ORDER BY total_sales DESC
     """,
 }
 

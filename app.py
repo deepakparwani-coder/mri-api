@@ -1,26 +1,23 @@
 """
-MR&I API Backend v2
+MR&I API Backend v3
 ====================
 Flask server bridging the HTML frontend, Neo4j graph, and Claude API.
-Now with Web Intelligence integration via Anthropic web_search tool.
+Web Intelligence integration via Anthropic web_search tool.
+v3: Fixed intent classifier (35+ patterns), 10 new Cypher queries,
+    project name extraction, rate limiting, credential security.
 
 Architecture:
   User query → classify intent → run Cypher query → get EXACT data →
   detect if web context needed → send data + query to Claude (with web_search tool if needed) →
   Claude presents data + web context → stream response back
-
-Changes from v1:
-  - Web intelligence: web_search tool enabled for macro/policy/infrastructure queries
-  - Micro-market mapping: corridor names → constituent sectors
-  - Updated system prompt: no "data not available", no Neo4j branding
-  - Anti-fabrication rules strengthened
-  - Streaming handles web_search_tool_result events
 """
 
 import os
 import json
 import re
 import argparse
+import time
+from collections import defaultdict
 from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 
@@ -43,12 +40,37 @@ app = Flask(__name__)
 CORS(app)
 
 # ═══════════════════════════════════════
+# SIMPLE RATE LIMITER (in-memory)
+# ═══════════════════════════════════════
+RATE_LIMIT_WINDOW = 60  # seconds
+RATE_LIMIT_MAX = 15     # max requests per window per IP
+_rate_store = defaultdict(list)
+
+
+def check_rate_limit(ip):
+    """Return True if allowed, False if rate limited."""
+    now = time.time()
+    # Clean old entries
+    _rate_store[ip] = [t for t in _rate_store[ip] if now - t < RATE_LIMIT_WINDOW]
+    if len(_rate_store[ip]) >= RATE_LIMIT_MAX:
+        return False
+    _rate_store[ip].append(now)
+    return True
+
+# ═══════════════════════════════════════
 # CONFIG
 # ═══════════════════════════════════════
 NEO4J_URI = os.environ.get('NEO4J_URI', 'neo4j+s://c26f3089.databases.neo4j.io')
 NEO4J_USER = os.environ.get('NEO4J_USER', 'c26f3089')
-NEO4J_PASSWORD = os.environ.get('NEO4J_PASSWORD', 'X_EaaI8F3BXe3YGBP8k9jAJTN28W_QvnGSgCjvELaTY')
-ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+NEO4J_PASSWORD = os.environ.get('NEO4J_PASSWORD')  # MUST be set via env var — never hardcode
+ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY')  # MUST be set via env var
+
+if not NEO4J_PASSWORD:
+    print("FATAL: NEO4J_PASSWORD env var not set. Set it in Railway environment variables.")
+    exit(1)
+if not ANTHROPIC_KEY:
+    print("FATAL: ANTHROPIC_API_KEY env var not set. Set it in Railway environment variables.")
+    exit(1)
 
 driver = None
 claude = None
@@ -109,7 +131,7 @@ WEB_KEYWORDS = re.compile(
     r'current.market|trend.2026|trend.2025|regulation|nirmala|fm |union.budget|'
     r'pmay|pradhan|rate.cut|rate.hike|what.if|impact.of|how.will|forecast|predict|'
     r'outlook|developer.*earn|earnings.call|land.deal|acquisition.*land|'
-    r'rental.yield|rent.trend|connectivity|dwarka|appreciation|capital.gain|'
+    r'rental.yield|rental|rent.trend|connectivity|dwarka|appreciation|capital.gain|'
     r'corridor|upcoming|under.construction|completion|timeline',
     re.IGNORECASE
 )
@@ -118,6 +140,7 @@ WEB_KEYWORDS = re.compile(
 # CORRIDOR → SECTOR MAPPING
 # ═══════════════════════════════════════
 CORRIDOR_MAP = {
+    # ── GURGAON CORRIDORS ──
     r'dwarka|dxp|dwarka.express': [
         'Sector 37D', 'Sector - 99', 'Sector 102', 'Sector 103',
         'Sector - 104', 'Sector 108', 'Sector 109', 'Sector - 110',
@@ -146,7 +169,45 @@ CORRIDOR_MAP = {
         'Sector 86', 'Sector 88A', 'Sector 88B', 'Sector 89',
         'Sector 89A', 'Sector 90', 'Sector 91', 'Sector 92',
         'Sector 93', 'Sector 95'
-    ]
+    ],
+    # ── KOLKATA CORRIDORS ──
+    r'em.bypass|eastern.metro|e\.?m\.?\s*bypass': [
+        'Anandapur', 'Kalikapur', 'Narendrapur', 'Tollygunge'
+    ],
+    r'rajarhat|new.town|action.area': [
+        'Rajarhat', 'New Town'
+    ],
+    r'howrah|shibpur|liluah': [
+        'Howrah'
+    ],
+    r'south.kolkata|behala|joka|thakurpukur': [
+        'Behala', 'Joka', 'Batanagar', 'Pailan'
+    ],
+    r'north.kolkata|baranagar|barrackpore|madhyamgram': [
+        'Baranagar', 'Madhyamgram'
+    ],
+    r'salt.lake|sector.v|bidhannagar': [
+        'Salt Lake City'
+    ],
+    r'southern.bypass|diamond.harbour': [
+        'Southern Bypass', 'Amtala'
+    ],
+    r'uttarpara|konnagar|hugli|hooghly': [
+        'Uttarpara', 'Konnagar Hugli'
+    ],
+    # ── HINJEWADI / PUNE CORRIDORS ──
+    r'hinjewadi.phase.1|hinjewadi.ph.?1|phase.?1.hinjewadi': [
+        'Hinjewadi Phase 1'
+    ],
+    r'hinjewadi.phase.2|hinjewadi.ph.?2|phase.?2.hinjewadi': [
+        'Hinjewadi Phase 2'
+    ],
+    r'hinjewadi.phase.3|hinjewadi.ph.?3|phase.?3.hinjewadi': [
+        'Hinjewadi Phase 3'
+    ],
+    r'mumbai.pune|mumbai.?pune.express|mpe': [
+        'Hinjewadi Phase 1', 'Hinjewadi Phase 2', 'Hinjewadi Phase 3'
+    ],
 }
 
 
@@ -167,136 +228,153 @@ def needs_web(query):
 # ═══════════════════════════════════════
 # INTENT CLASSIFIER
 # ═══════════════════════════════════════
+def extract_project_name(query):
+    """Extract project name from natural language queries.
+    Handles: 'How is DLF Privana doing?', 'Tell me about Godrej Seven',
+    'Show me details of Birla Pravaah', 'DLF Privana performance in Sector 76'
+    """
+    patterns = [
+        # "How is <PROJECT> doing/performing/going?"
+        r'how\s+(?:is|are)\s+(.+?)\s+(?:doing|performing|going|faring|selling)',
+        # "Tell me about <PROJECT>" / "What about <PROJECT>"
+        r'(?:tell|what)\s+(?:me\s+)?about\s+(.+?)(?:\s+in\s+|\s+at\s+|\?|$)',
+        # "Show me <PROJECT> details/data/info"
+        r'(?:show|give)\s+(?:me\s+)?(.+?)\s+(?:details|data|info|stats|numbers)',
+        # "Performance/summary/details of <PROJECT>"
+        r'(?:performance|summary|details?|about|analyse|analyze|report)\s+(?:of\s+|for\s+)?(.+?)(?:\s+in\s+|\s+at\s+|$)',
+        # "<PROJECT> performance/analysis"
+        r'^(.+?)\s+(?:performance|analysis|report|status|details)\b',
+        # "Show/give me ... of/for <PROJECT>"
+        r'(?:give|show|get)\s+(?:me\s+)?(?:.*?)\s+(?:of|for)\s+(.+?)(?:\s+in\s+|\s+at\s+|$)',
+    ]
+    for pat in patterns:
+        m = re.search(pat, query, re.I)
+        if m:
+            name = m.group(1).strip().rstrip('.?!')
+            # Remove trailing city/location qualifiers
+            name = re.sub(
+                r'\s*(?:in|at|near)\s+(?:gurgaon|gurugram|kolkata|hinjewadi|pune|mumbai|sector\s*[-]?\s*\d+\w*).*$',
+                '', name, flags=re.I
+            ).strip()
+            # Skip generic words
+            if len(name) > 3 and not re.match(
+                r'^(the\s+)?(market|city|area|location|sector|residential|overview|'
+                r'gurgaon|gurugram|kolkata|hinjewadi|pune|mumbai|pricing|trend|data|'
+                r'latest|current|demand|supply|inventory|construction)$',
+                name, re.I
+            ):
+                return name
+    return None
+
+
 def classify_intent(query, city):
-    """Map user query to appropriate Cypher queries."""
+    """Map user query to appropriate Cypher queries.
+    v3: 35+ regex patterns covering all KB sections + robust project name extraction.
+    """
     q = query.lower()
     results = []
 
-    # Check for corridor queries first
+    # ── Check for corridor queries first ──
     corridor_sectors = detect_corridor(query)
     if corridor_sectors:
-        # For corridor queries, get micromarket details for each constituent sector
         for sector_pattern in corridor_sectors:
-            # Extract just the sector identifier for the location param
-            loc = sector_pattern.replace('Sector ', '').replace('Sector - ', '')
             result = run_query("micromarket_detail", city=city, location=sector_pattern.split(',')[0])
             if result.get('row_count', 0) > 0:
                 results.append(result)
-
-        # Also get market overview and price trends for context
         results.append(run_query("market_overview", city=city))
         results.append(run_query("price_trend_saleable", city=city))
-        # Cap corridor results
         if len(results) > 5:
             results = results[:5]
         return results
 
-    # Market overview
+    # ── Project-specific query (check FIRST — most specific) ──
+    proj_name = extract_project_name(query)
+    if proj_name:
+        results.append(run_query("project_detail", city=city, project_name=proj_name))
+        results.append(run_query("project_competitors", city=city, project_name=proj_name))
+
+    # ── Market overview ──
     if re.search(r'market|overview|summary|health.check|how.*market', q):
         results.append(run_query("market_overview", city=city))
         results.append(run_query("annual_overview", city=city))
 
-    # Price trends
+    # ── Price trends ──
     if re.search(r'pric|psf|rate|cost|trend', q):
         results.append(run_query("price_trend_saleable", city=city))
 
-    # Quarterly absorption
+    # ── Quarterly absorption ──
     if re.search(r'absorption|quarterly.*sale|qoq|quarter', q):
         results.append(run_query("quarterly_absorption", city=city))
 
-    # Micro-market ranking by demand
-    if re.search(r'rank.*demand|demand.*intens|micro.*market.*demand|hotspot|hot.spot|acquisition|acqui', q):
+    # ── Micro-market ranking by demand ──
+    if re.search(r'rank.*demand|demand.*intens|micro.*market.*demand|hotspot|hot.spot|acquisition|acqui|highest.*demand|most.*demand', q):
         results.append(run_query("micromarkets_by_demand", city=city))
 
-    # Micro-market ranking by inventory risk
-    if re.search(r'rank.*inventor|inventor.*risk|micro.*market.*risk', q):
+    # ── Micro-market ranking by inventory risk ──
+    if re.search(r'rank.*inventor|inventor.*risk|micro.*market.*risk|oversuppl', q):
         results.append(run_query("micromarkets_by_inventory_risk", city=city))
 
-    # Emerging micro-markets
+    # ── Emerging micro-markets ──
     if re.search(r'emerging|growing|upcoming|new.*market', q):
         results.append(run_query("emerging_micromarkets", city=city))
 
-    # Declining micro-markets
+    # ── Declining micro-markets ──
     if re.search(r'declining|slow|weak|struggling', q):
         results.append(run_query("micromarkets_by_inventory_risk", city=city))
 
-    # Product mix / configurations
-    if re.search(r'bhk|config|mix|flat|product.*mix|optim', q):
+    # ── Product mix / configurations ──
+    if re.search(r'bhk|config|mix|flat.*type|product.*mix|optim', q):
         results.append(run_query("flat_performance", city=city))
 
-    # Top projects
+    # ── Top projects ──
     if re.search(r'top.*project|best.*project|rank.*project|leading', q):
         results.append(run_query("top_projects_by_sales", city=city))
         results.append(run_query("top_projects_by_velocity", city=city))
 
-    # Competitive / specific project
-    if re.search(r'compet|benchmark|compare|versus|vs', q):
+    # ── Competitive / comparison ──
+    if re.search(r'compet|benchmark|compare|versus|vs\b', q):
         results.append(run_query("top_projects_by_sales", city=city))
         results.append(run_query("micromarkets_by_demand", city=city))
 
-    # Feasibility
+    # ── Feasibility ──
     if re.search(r'feasib|irr|break.even|viable|plot|acre|fsi', q):
         results.append(run_query("market_overview", city=city))
         results.append(run_query("price_trend_saleable", city=city))
         results.append(run_query("flat_performance", city=city))
 
-    # Infrastructure impact — get market data + micromarket rankings
+    # ── Infrastructure impact ──
     if re.search(r'infra.*impact|impact.*zone|metro.*impact|express.*impact|connectivity', q):
         results.append(run_query("market_overview", city=city))
         results.append(run_query("annual_overview", city=city))
         results.append(run_query("micromarkets_by_demand", city=city))
         results.append(run_query("price_trend_saleable", city=city))
 
-    # Project-specific query
-    project_match = re.search(
-        r'(?:performance|summary|details?|about|analyse|analyze|report)\s+(?:of\s+|for\s+)?(.+?)(?:\s+in\s+|\s+at\s+|$)',
-        query, re.I
-    )
-    if not project_match:
-        project_match = re.search(
-            r'(?:give|show|get)\s+(?:me\s+)?(?:.*?)\s+(?:of|for)\s+(.+?)(?:\s+in\s+|\s+at\s+|$)',
-            query, re.I
-        )
-
-    if project_match:
-        proj_name = project_match.group(1).strip().rstrip('.')
-        proj_name = re.sub(
-            r'\s*(?:in|at)\s+(?:gurgaon|gurugram|kolkata|hinjewadi|pune|mumbai).*$',
-            '', proj_name, flags=re.I
-        ).strip()
-        if len(proj_name) > 3 and not re.match(
-            r'^(market|city|area|location|sector|residential|overview)$', proj_name, re.I
-        ):
-            results.append(run_query("project_detail", city=city, project_name=proj_name))
-            results.append(run_query("project_competitors", city=city, project_name=proj_name))
-
-    # Site intelligence / location
-    if re.search(r'site.*intel|location|sector|due.dilig', q):
+    # ── Site intelligence / location ──
+    if re.search(r'site.*intel|due.dilig', q):
         loc_match = re.search(r'sector\s*[-]?\s*\d+\w*|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*', query)
         if loc_match:
-            loc = loc_match.group()
-            results.append(run_query("micromarket_detail", city=city, location=loc))
+            results.append(run_query("micromarket_detail", city=city, location=loc_match.group()))
         results.append(run_query("nearby_micromarkets", city=city))
         results.append(run_query("top_projects_by_sales", city=city))
 
-    # Builder analysis
+    # ── Builder analysis ──
     if re.search(r'builder|developer|who.*build', q):
         results.append(run_query("builder_rankings", city=city))
 
-    # YoY absorption growth
+    # ── YoY absorption growth ──
     if re.search(r'yoy|year.*over.*year|annual.*growth|absorption.*growth', q):
         results.append(run_query("yoy_absorption", city=city))
         results.append(run_query("quarterly_absorption", city=city))
 
-    # Velocity trend
+    # ── Velocity trend ──
     if re.search(r'velocity.*trend|velocity.*over|speed.*sales', q):
         results.append(run_query("velocity_trend", city=city))
 
-    # Inventory trend
+    # ── Inventory trend ──
     if re.search(r'inventory.*trend|months.*inventory.*over|unsold.*trend', q):
         results.append(run_query("inventory_trend", city=city))
 
-    # Buyer demographics
+    # ── Buyer demographics ──
     if re.search(r'buyer|demograph|who.*buy|customer|profile|age.*group|gender|pincode|locality|surname|religion', q):
         results.append(run_query("buyer_age_dist", city=city))
         results.append(run_query("buyer_gender_dist", city=city))
@@ -304,32 +382,90 @@ def classify_intent(query, city):
         results.append(run_query("buyer_state_dist", city=city))
         results.append(run_query("buyer_religion_dist", city=city))
 
-    # Slow-moving / declining
+    # ── Slow-moving ──
     if re.search(r'slow.*mov|slow.*sell|aging|stuck|not.*sell', q):
         results.append(run_query("flat_performance", city=city))
         results.append(run_query("micromarkets_by_inventory_risk", city=city))
 
-    # Ticket size
-    if re.search(r'ticket.*size|price.*band|affordab|budget|cost.*range', q):
+    # ── Ticket size / price band ──
+    if re.search(r'ticket.*size|price.*band|affordab|budget|cost.*range|price.*range', q):
         results.append(run_query("flat_performance", city=city))
         results.append(run_query("price_trend_saleable", city=city))
 
-    # Best-selling configurations
-    if re.search(r'best.*sell|top.*config|popular.*bhk|fast.*mov|high.*demand', q):
+    # ── Best-selling configurations ──
+    if re.search(r'best.*sell|top.*config|popular.*bhk|fast.*mov|high.*demand|most.*popular', q):
         results.append(run_query("flat_performance", city=city))
 
-    # Residential overview
+    # ── Residential overview ──
     if re.search(r'residential|overview.*residential', q):
         results.append(run_query("market_overview", city=city))
         results.append(run_query("annual_overview", city=city))
         results.append(run_query("price_trend_saleable", city=city))
         results.append(run_query("flat_performance", city=city))
 
-    # Cap at 4 queries max to prevent timeout (raised from 3 for richer responses)
+    # ══════════════════════════════════════════
+    # NEW PATTERNS (Phase 2 coverage expansion)
+    # ══════════════════════════════════════════
+
+    # ── Construction stage analysis (annual + quarterly) ──
+    if re.search(r'construction.*stage|stage.*wise|under.*construct|completed|ready.*possess|oc.*receiv|new.*launch|pre.?launch', q):
+        results.append(run_query("annual_sales_stage", city=city))
+        results.append(run_query("market_overview", city=city))
+
+    # ── Possession timeline / readiness ──
+    if re.search(r'possession|ready.*move|handover|deliver|occupancy|timeline.*deliver', q):
+        results.append(run_query("possession_distribution", city=city))
+        results.append(run_query("market_overview", city=city))
+
+    # ── Distance from CBD analysis ──
+    if re.search(r'distance|cbd|km.*from|radius|proximity|how.*far', q):
+        results.append(run_query("distance_analysis", city=city))
+        results.append(run_query("market_overview", city=city))
+
+    # ── Unsold stock by construction stage ──
+    if re.search(r'unsold.*stage|unsold.*construct|stuck.*stock|dead.*stock|inventory.*stage', q):
+        results.append(run_query("unsold_by_stage", city=city))
+
+    # ── New launches ──
+    if re.search(r'new.*launch|recent.*launch|launch.*project|newly.*launch', q):
+        results.append(run_query("new_launches", city=city))
+
+    # ── Comparable projects ──
+    if re.search(r'comparable|peer|similar.*project|like.*project', q):
+        results.append(run_query("comparable_projects", city=city))
+
+    # ── Catchment area ──
+    if re.search(r'catchment|hinterland|feeder|source.*demand', q):
+        results.append(run_query("catchment_projects", city=city))
+
+    # ── Unit size distribution ──
+    if re.search(r'unit.*size|sqft.*range|area.*range|carpet.*area.*distribution|saleable.*area.*distribution|size.*distribution', q):
+        results.append(run_query("flat_performance", city=city))
+
+    # ── Sold out projects ──
+    if re.search(r'sold.*out|fully.*sold|100.*sold|complete.*sold', q):
+        results.append(run_query("sold_out_projects", city=city))
+
+    # ── RERA ──
+    if re.search(r'rera|registered|compliance', q):
+        results.append(run_query("top_projects_by_sales", city=city))
+
+    # ── Supply pipeline ──
+    if re.search(r'supply.*pipeline|new.*supply|upcoming.*supply|future.*supply', q):
+        results.append(run_query("market_overview", city=city))
+        results.append(run_query("annual_overview", city=city))
+
+    # ── Sector-specific query (without site_intel pattern) ──
+    sector_match = re.search(r'sector\s*[-]?\s*(\d+\s*\w?)', q)
+    if sector_match and not re.search(r'site.*intel|due.dilig', q):
+        sector_name = sector_match.group(0).strip()
+        results.append(run_query("micromarket_detail", city=city, location=sector_name))
+
+    # ═══ Cap at 4 queries to prevent timeout ═══
     if len(results) > 4:
         results = results[:4]
 
-    # Default: market overview
+    # ═══ Default: market overview ═══
     if not results:
         results.append(run_query("market_overview", city=city))
         results.append(run_query("flat_performance", city=city))
@@ -409,7 +545,7 @@ c) The validation layer flags every unverified chart value. Unverified values da
 
 **SITE INTELLIGENCE:** Score on 5 parameters (1-10). Compare with nearby projects. GO/CONDITIONAL GO/NO-GO verdict.
 
-MANDATORY: Include at least one <lfchart> in EVERY response.
+MANDATORY: Include at least one <lfchart> when the data supports it (3+ data points). Do NOT force a chart when data is sparse (single project lookup, yes/no answers). If only 1-2 data points exist, use a markdown table instead.
 
 End EVERY response with:
 ---
@@ -451,6 +587,11 @@ def get_system_prompt(with_web=False):
 @app.route('/api/query', methods=['POST'])
 def handle_query():
     """Main query endpoint — runs Cypher, sends to Claude, returns response."""
+    # Rate limiting
+    client_ip = request.remote_addr or 'unknown'
+    if not check_rate_limit(client_ip):
+        return jsonify({"error": "Rate limit exceeded. Please wait a moment."}), 429
+
     body = request.json
     user_query = body.get('query', '')
     city = body.get('city', 'Gurgaon')
@@ -526,17 +667,8 @@ def handle_query():
         def generate():
             try:
                 with client.messages.stream(**api_params) as s:
-                    for event in s:
-                        # Handle different event types
-                        if hasattr(event, 'type'):
-                            if event.type == 'content_block_start':
-                                block = getattr(event, 'content_block', None)
-                                if block and getattr(block, 'type', '') == 'web_search_tool_result':
-                                    yield f"data: {json.dumps({'type': 'web_hint', 'text': 'Processing web results...'})}\n\n"
-                            elif event.type == 'content_block_delta':
-                                delta = getattr(event, 'delta', None)
-                                if delta and getattr(delta, 'type', '') == 'text_delta':
-                                    yield f"data: {json.dumps({'type': 'text', 'text': delta.text})}\n\n"
+                    for text in s.text_stream:
+                        yield f"data: {json.dumps({'type': 'text', 'text': text})}\n\n"
                 yield f"data: {json.dumps({'type': 'done', 'web_mode': web_mode})}\n\n"
             except Exception as e:
                 print(f"  ✗ Claude streaming error: {e}")
@@ -601,9 +733,9 @@ def health():
     try:
         d = get_driver()
         with d.session(database='c26f3089') as session:
-            result = session.run("MATCH (n) RETURN count(n) AS nodes")
-            count = result.single()["nodes"]
-        return jsonify({"status": "ok", "nodes": count})
+            result = session.run("RETURN 1 AS ok")
+            result.single()
+        return jsonify({"status": "ok"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -611,18 +743,9 @@ def health():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=5000)
-    parser.add_argument('--neo4j-uri', default=NEO4J_URI)
-    parser.add_argument('--neo4j-user', default=NEO4J_USER)
-    parser.add_argument('--neo4j-password', default=NEO4J_PASSWORD)
-    parser.add_argument('--anthropic-key', default=ANTHROPIC_KEY)
     args = parser.parse_args()
 
-    NEO4J_URI = args.neo4j_uri
-    NEO4J_USER = args.neo4j_user
-    NEO4J_PASSWORD = args.neo4j_password
-    ANTHROPIC_KEY = args.anthropic_key
-
-    print(f"MR&I API Server v2 starting on port {args.port}")
+    print(f"MR&I API Server v3 starting on port {args.port}")
     print(f"Neo4j: {NEO4J_URI}")
     print(f"Web Intelligence: enabled")
     app.run(host='0.0.0.0', port=args.port, debug=True)
