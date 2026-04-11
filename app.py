@@ -530,6 +530,17 @@ c) The validation layer flags every unverified chart value. Unverified values da
 - Use markdown tables for structured comparisons
 - Keep paragraphs concise — 2-3 sentences max per point
 
+=== PRODUCT MIX CLASSIFICATION (CRITICAL) ===
+The flat_performance data contains TWO types of entries mixed together:
+- BHK CONFIGURATIONS (product types): 1 BHK, 1.5 BHK, 2 BHK, 2.5/3 BHK, 3.5/4 BHK, 5+ BHK, Duplex/Penthouse, Studio/1 RK
+- BUILDING TYPOLOGIES (construction types): Floors, Services Apt, Villa, Plot, Retail, Commercial
+
+When analyzing product mix:
+1. ONLY rank BHK configurations against each other. "Floors" is NOT a competing configuration to "3 BHK".
+2. Present building typologies SEPARATELY if relevant, labeled as "Building Type Analysis" — NOT mixed into "Top Performing Configurations".
+3. If asked "What BHK should I build?" — exclude Floors, Services Apt, Villa, Plot from the ranking. These are structural choices, not unit-type choices.
+4. The labels from data may include: "Floors", "Services Apt", "Villa", "Plot" — recognize these as NON-BHK categories.
+
 === ANALYSIS MODES ===
 
 **MARKET OVERVIEW:** Report supply, sales, unsold, MI, velocity, pricing from quarterly and annual data.
