@@ -197,17 +197,18 @@ CORRIDOR_MAP = {
         'Uttarpara', 'Konnagar Hugli'
     ],
     # ── HINJEWADI / PUNE CORRIDORS ──
-    r'hinjewadi.phase.1|hinjewadi.ph.?1|phase.?1.hinjewadi': [
-        'Hinjewadi Phase 1'
-    ],
-    r'hinjewadi.phase.2|hinjewadi.ph.?2|phase.?2.hinjewadi': [
-        'Hinjewadi Phase 2'
-    ],
-    r'hinjewadi.phase.3|hinjewadi.ph.?3|phase.?3.hinjewadi': [
-        'Hinjewadi Phase 3'
-    ],
+    r'wakad|wakad.road': ['Wakad'],
+    r'punawale|punawale.road': ['Punawale'],
+    r'mahalunge|mahalunge.road': ['Mahalunge'],
+    r'baner|baner.road': ['Baner'],
+    r'tathawade': ['Tathawade'],
+    r'hinjewadi|hinjawadi': ['Hinjewadi'],
+    r'ravet': ['Ravet'],
+    r'talegaon|talegaon.dabhade': ['Talegaon'],
+    r'chakan': ['Chakan'],
+    r'kiwale': ['Kiwale'],
     r'mumbai.pune|mumbai.?pune.express|mpe': [
-        'Hinjewadi Phase 1', 'Hinjewadi Phase 2', 'Hinjewadi Phase 3'
+        'Hinjewadi', 'Wakad', 'Punawale', 'Mahalunge', 'Baner', 'Tathawade'
     ],
 }
 
@@ -390,7 +391,7 @@ def classify_intent(query, city):
 
     # ── Ticket size / price band ──
     if re.search(r'ticket.*size|price.*band|affordab|budget|cost.*range|price.*range', q):
-        results.append(run_query("flat_performance", city=city))
+        results.append(run_query("ticket_size", city=city))
         results.append(run_query("price_trend_saleable", city=city))
 
     # ── Best-selling configurations ──
@@ -409,8 +410,8 @@ def classify_intent(query, city):
     # ══════════════════════════════════════════
 
     # ── Construction stage analysis (annual + quarterly) ──
-    if re.search(r'construction.*stage|stage.*wise|under.*construct|completed|ready.*possess|oc.*receiv|new.*launch|pre.?launch', q):
-        results.append(run_query("annual_sales_stage", city=city))
+    if re.search(r'construction.*stage|stage.*wise|under.*construct|completed|ready.*possess|oc.*receiv|pre.?launch', q):
+        results.append(run_query("construction_stage", city=city))
         results.append(run_query("market_overview", city=city))
 
     # ── Possession timeline / readiness ──
@@ -425,7 +426,7 @@ def classify_intent(query, city):
 
     # ── Unsold stock by construction stage ──
     if re.search(r'unsold.*stage|unsold.*construct|stuck.*stock|dead.*stock|inventory.*stage', q):
-        results.append(run_query("unsold_by_stage", city=city))
+        results.append(run_query("construction_stage", city=city))
 
     # ── New launches ──
     if re.search(r'new.*launch|recent.*launch|launch.*project|newly.*launch', q):
@@ -437,15 +438,11 @@ def classify_intent(query, city):
 
     # ── Catchment area ──
     if re.search(r'catchment|hinterland|feeder|source.*demand', q):
-        results.append(run_query("catchment_projects", city=city))
-
-    # ── Unit size distribution ──
-    if re.search(r'unit.*size|sqft.*range|area.*range|carpet.*area.*distribution|saleable.*area.*distribution|size.*distribution', q):
-        results.append(run_query("flat_performance", city=city))
+        results.append(run_query("comparable_projects", city=city))
 
     # ── Sold out projects ──
     if re.search(r'sold.*out|fully.*sold|100.*sold|complete.*sold', q):
-        results.append(run_query("sold_out_projects", city=city))
+        results.append(run_query("comparable_projects", city=city))
 
     # ── RERA ──
     if re.search(r'rera|registered|compliance', q):
@@ -456,15 +453,26 @@ def classify_intent(query, city):
         results.append(run_query("market_overview", city=city))
         results.append(run_query("annual_overview", city=city))
 
-    # ── Sector-specific query (without site_intel pattern) ──
-    sector_match = re.search(r'sector\s*[-]?\s*(\d+\s*\w?)', q)
-    if sector_match and not re.search(r'site.*intel|due.dilig', q):
-        sector_name = sector_match.group(0).strip()
-        results.append(run_query("micromarket_detail", city=city, location=sector_name))
+    # ── Ticket size / cost range analysis ──
+    if re.search(r'ticket.*size|cost.*range|price.*segment|budget.*segment|affordab.*segment|luxury.*segment', q):
+        results.append(run_query("ticket_size", city=city))
 
-    # ═══ Cap at 4 queries to prevent timeout ═══
-    if len(results) > 4:
-        results = results[:4]
+    # ── Unit size distribution ──
+    if re.search(r'unit.*size|sqft.*range|area.*range|carpet.*area.*distribution|saleable.*area.*distribution|size.*distribution', q):
+        results.append(run_query("unit_size_saleable", city=city))
+
+    # ── Total projects / project count ──
+    if re.search(r'total.*project|how.*many.*project|number.*project|count.*project|all.*project', q):
+        results.append(run_query("project_count", city=city))
+        results.append(run_query("comparable_projects", city=city))
+
+    # ── Micromarket list / sub-regions / areas ──
+    if re.search(r'micro.*market|sub.*region|area.*within|region.*within|localities|zones|which.*areas', q):
+        results.append(run_query("micromarket_list", city=city))
+
+    # ═══ Cap at 5 queries to prevent timeout ═══
+    if len(results) > 5:
+        results = results[:5]
 
     # ═══ Default: market overview ═══
     if not results:
