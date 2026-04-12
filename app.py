@@ -224,7 +224,11 @@ def detect_corridor(query):
 
 def needs_web(query):
     """Detect if query needs web intelligence."""
-    return bool(WEB_KEYWORDS.search(query or ""))
+    q = query or ""
+    # Always enable web for feasibility/site queries — they need location context
+    if re.search(r'feasib|plot.*area|acre|fsi|dcr|google.*map|goo\.gl|maps\.google|site.*intel|due.dilig|land.*acqui', q, re.IGNORECASE):
+        return True
+    return bool(WEB_KEYWORDS.search(q))
 
 
 # ═══════════════════════════════════════
@@ -338,11 +342,13 @@ def classify_intent(query, city):
         results.append(run_query("top_projects_by_sales", city=city))
         results.append(run_query("micromarkets_by_demand", city=city))
 
-    # ── Feasibility ──
-    if re.search(r'feasib|irr|break.even|viable|plot|acre|fsi', q):
+    # ── Feasibility (COMPREHENSIVE — pull all relevant data) ──
+    if re.search(r'feasib|irr|break.even|viable|plot|acre|fsi|dcr|google.*map|goo\.gl|maps\.google', q):
         results.append(run_query("market_overview", city=city))
         results.append(run_query("price_trend_saleable", city=city))
         results.append(run_query("flat_performance", city=city))
+        results.append(run_query("comparable_projects", city=city))
+        results.append(run_query("ticket_size", city=city))
 
     # ── Infrastructure impact ──
     if re.search(r'infra.*impact|impact.*zone|metro.*impact|express.*impact|connectivity', q):
@@ -558,12 +564,110 @@ When analyzing product mix:
 
 **COMPETITIVE BENCHMARK:** Compare projects using exact data. Rank by composite score.
 
-**LAND FEASIBILITY:**
-- Buildable = Plot x FSI. Saleable = Buildable x Efficiency (70% freehold, 55% SRA, 65% MHADA)
-- Revenue = Saleable x Price PSF. Cost = Land + Construction + Approvals(10%) + Marketing(4%) + Finance(13%) + Contingency(5%)
-- Always show sensitivity: Base, Optimistic(+10%), Pessimistic(-10% price, -20% velocity)
+**LAND FEASIBILITY (COMPREHENSIVE — Use when user provides plot details, FSI, Google Maps link, or asks about feasibility):**
 
-**SITE INTELLIGENCE:** Score on 5 parameters (1-10). Compare with nearby projects. GO/CONDITIONAL GO/NO-GO verdict.
+This is the MOST IMPORTANT analysis mode. When a CXO or land acquisition head asks for feasibility, they expect a report that matches what Anarock, Knight Frank, or CBRE would deliver. Follow this EXACT framework:
+
+**STEP 1 — LOCATION IDENTIFICATION**
+If the user provides a Google Maps URL:
+- Extract the coordinates from the URL (look for patterns like @18.574949,73.689848 or place/18°34'29.8"N+73°41'23.5"E)
+- State the exact coordinates in the response
+- Identify which micromarket this falls under from the LF data
+- Use web_search to identify: "what is near [coordinates/location name]" — nearby landmarks, IT parks, highways, metro stations
+
+**STEP 2 — SITE SURROUNDINGS ANALYSIS (use web_search — MANDATORY for feasibility queries)**
+Search for and score the site on these 8 parameters. For each, identify specific landmarks within 1-5 km radius and assign a score (1-10):
+
+| Parameter | What to Search For | Score Guide |
+|---|---|---|
+| 1. CONNECTIVITY | Nearest highway/expressway, distance to airport, nearest railway station, road width frontage | 9-10: Highway <1km, Airport <20km. 5-6: Highway 3-5km. 1-3: Remote |
+| 2. PUBLIC TRANSIT | Nearest metro station (existing/upcoming), bus depot, BRTS, auto/cab accessibility | 9-10: Metro <500m. 5-6: Metro 2-5km. 1-3: No transit |
+| 3. CORPORATE DEMAND DRIVERS | Nearby IT parks, SEZs, business districts, corporate offices (Infosys, TCS, Wipro campuses) | 9-10: IT park <2km. 5-6: IT park 5-10km. 1-3: No corporate hub |
+| 4. SOCIAL INFRASTRUCTURE | Hospitals (multi-specialty), shopping malls, restaurants, entertainment, community spaces | 9-10: Hospital + Mall <3km. 5-6: Basic amenities only. 1-3: Undeveloped |
+| 5. EDUCATIONAL INSTITUTIONS | Schools (CBSE/ICSE/IB), colleges, universities, coaching centers | 9-10: Top school <2km. 5-6: Schools 3-5km. 1-3: No schools nearby |
+| 6. FUTURE GROWTH CATALYSTS | Upcoming infrastructure — metro extension, ring road, new highway, govt projects, Smart City initiatives | 9-10: Major infra project underway <5km. 5-6: Planned. 1-3: No pipeline |
+| 7. COMPETITIVE LANDSCAPE | Number of active competing projects, pricing pressure, inventory overhang in the micro-market | Use LF data: Velocity >3% and MI <18 = 9-10. MI 18-30 = 5-6. MI >30 = 1-3 |
+| 8. CATCHMENT QUALITY | Income profile of surrounding area, buyer demographics from IGR data, employment base | Use LF buyer data if available. IT corridor = 8-10. Mixed = 5-7. Low income = 1-3 |
+
+Present this as a SITE SCORECARD TABLE with the specific landmark names, distances, and scores.
+
+**STEP 3 — DEVELOPMENT ECONOMICS (from LF data)**
+Calculate all of these — NEVER skip any line item:
+
+A. BUILDABLE AREA CALCULATION:
+   - Gross Plot Area (from user input)
+   - Net Plot Area = Gross × 85% (road surrender, setbacks, amenity space)
+   - Total BUA = Net Plot × FSI
+   - Saleable Area = BUA × Efficiency (70% freehold residential, 55% SRA, 65% MHADA, 75% commercial)
+   - Carpet Area = Saleable × 0.74 (RERA carpet ratio)
+
+B. REVENUE PROJECTION (use LF price data from the micromarket):
+   - Identify weighted avg saleable price PSF from LF data for this micromarket
+   - Residential Revenue = Saleable Area × Price PSF
+   - If mixed-use: Commercial Revenue = Commercial Saleable × Commercial PSF
+   - Total Gross Revenue = Residential + Commercial
+   - Net Revenue = Gross × 0.95 (5% brokerage + stamp duty absorption)
+
+C. COST STRUCTURE (line by line):
+   - Land Cost: User may provide, or estimate from market rates
+   - Construction Cost: Rs. 3,500-5,000 PSF on BUA (varies by city — Rs. 4,000 Pune, Rs. 4,500 Gurgaon, Rs. 3,500 Kolkata)
+   - Premium/Fungible FSI Cost: If applicable
+   - Approvals & Statutory: 8-12% of construction cost
+   - Marketing & Sales: 3-5% of revenue
+   - Finance Cost: 12-15% on 60% of project cost over construction period
+   - Contingency: 3-5% of total cost
+   - Total Project Cost
+
+D. PROFITABILITY:
+   - Gross Margin = (Revenue - Cost) / Revenue × 100
+   - Project IRR: Estimate based on phased cash flows over 4-6 year timeline
+   - Equity Multiple: Revenue / Equity deployed
+   - Breakeven: At what % sold does the project cover costs
+
+E. SENSITIVITY ANALYSIS (MANDATORY — present as table):
+   | Scenario | Price PSF | Velocity | Revenue | Cost | Margin | IRR |
+   |---|---|---|---|---|---|---|
+   | Pessimistic | -15% from market | -25% | calc | same | calc | calc |
+   | Base | Market rate | Market avg | calc | same | calc | calc |
+   | Optimistic | +10% premium | +15% | calc | same | calc | calc |
+
+**STEP 4 — COMPETITIVE POSITIONING (from LF data)**
+- Pull ALL projects from the same micromarket using the comparable_projects data
+- Show top 10 by annual sales with their exact metrics
+- Identify PRICING GAPS — price bands with low competition
+- Identify CONFIGURATION GAPS — BHK types undersupplied
+- Show velocity leaders as benchmarks for what sells
+
+**STEP 5 — PRODUCT STRATEGY RECOMMENDATION**
+Based on LF data analysis:
+- Recommended configurations (from flat_performance — which BHK has highest velocity)
+- Recommended ticket size (from ticket_size data — which price band has best absorption)
+- Recommended unit sizes (from unit_size data)
+- Phasing strategy (Phase 1 launch size, based on market absorption rate)
+- Positioning: Where should this project sit vs competitors
+
+**STEP 6 — RISK MATRIX**
+| Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|
+| Market slowdown | Use LF velocity trend | Revenue impact % | Phasing, pricing flexibility |
+| Oversupply | Use MI from LF data | Absorption delay | Differentiated product |
+| Regulatory delay | Medium | Timeline extension | Pre-approvals |
+| Construction cost escalation | Medium | Margin compression | Fixed-price contracts |
+| Interest rate risk | Use web_search for RBI outlook | EMI impact on buyers | Subvention scheme |
+
+**STEP 7 — GO / CONDITIONAL GO / NO-GO VERDICT**
+Based on the scorecard:
+- Total Score > 65/80: GO — Strong fundamentals, proceed with acquisition
+- Total Score 45-65/80: CONDITIONAL GO — Proceed with conditions (specify which parameters need resolution)
+- Total Score < 45/80: NO-GO — Fundamental risks outweigh opportunity
+
+Present the verdict prominently with a 1-paragraph executive summary of WHY.
+
+=== CRITICAL RULE FOR FEASIBILITY ===
+When a feasibility query comes in, ALWAYS activate web_search even if the query doesn't match web keywords.
+The user expects location-specific intelligence that REQUIRES web search — nearby landmarks, upcoming infrastructure, corporate campuses. LF data alone is NOT sufficient for feasibility. The combination of LF market data + web location intelligence is what makes this analysis valuable.
+
+**SITE INTELLIGENCE:** Same as Land Feasibility but without the financial projections. Focus on Steps 1-2 (location + surroundings) and Step 7 (verdict). Used for quick site assessments without full financial modeling.
 
 MANDATORY: Include at least one <lfchart> when the data supports it (3+ data points). Do NOT force a chart when data is sparse (single project lookup, yes/no answers). If only 1-2 data points exist, use a markdown table instead.
 
@@ -669,9 +773,13 @@ def handle_query():
     system_prompt = get_system_prompt(with_web=web_mode)
     client = get_claude()
 
+    # Feasibility queries need more tokens for comprehensive reports
+    is_feasibility = bool(re.search(r'feasib|plot.*area|acre|fsi|dcr|google.*map|site.*intel', user_query, re.IGNORECASE))
+    token_limit = 8000 if is_feasibility else 4000
+
     api_params = {
         "model": "claude-sonnet-4-20250514",
-        "max_tokens": 4000,
+        "max_tokens": token_limit,
         "system": system_prompt,
         "messages": messages,
     }
@@ -679,7 +787,7 @@ def handle_query():
     # Add web search tool if needed
     if web_mode:
         api_params["tools"] = [
-            {"type": "web_search_20250305", "name": "web_search", "max_uses": 3}
+            {"type": "web_search_20250305", "name": "web_search", "max_uses": 5}
         ]
 
     # Step 6: Call Claude
