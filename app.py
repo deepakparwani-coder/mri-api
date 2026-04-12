@@ -636,11 +636,30 @@ C. LAND COST SENSITIVITY MATRIX (instead of guessing):
    3. Any premium FSI or TDR costs applicable
    I will recalculate the full P&L with your exact numbers."
 
-D. OTHER COST COMPONENTS (compute using standard percentages):
-   - Approvals & Statutory: 10% of construction cost
-   - Marketing & Sales: 4% of revenue
-   - Finance Cost: 13% on 60% of project cost over construction period
-   - Contingency: 5% of total cost
+D. COST STRUCTURE — USER INPUTS FIRST:
+
+   Check if the user has provided ANY of these. If yes, use their numbers. If no, use defaults BUT clearly label them as assumptions:
+
+   | Cost Component | User Provided? | Default Assumption | Notes |
+   |---|---|---|---|
+   | Land Cost | MUST ASK if not provided | Show sensitivity matrix | Most critical input |
+   | Construction Cost PSF | Use if provided | Rs.4,000 Pune, Rs.4,500 Gurgaon, Rs.3,500 Kolkata | Varies by developer — Godrej/Lodha: Rs.5,500+, Local: Rs.3,500 |
+   | Approvals & Statutory % | Use if provided | 10% of construction | Varies by state — MH higher than HR |
+   | Marketing & Sales % | Use if provided | 4% of revenue | Brand developers spend less (2-3%), new entrants more (5-6%) |
+   | Finance Cost % | Use if provided | 13% on 60% of project cost | Depends on debt-equity ratio, developer's borrowing rate |
+   | Contingency % | Use if provided | 5% of total cost | Standard buffer |
+
+   ALWAYS present the defaults table with a note:
+   "**Assumptions Used:** The above uses industry-standard cost assumptions for [city]. Your actual costs may differ significantly. To get a precise P&L, share your:
+   1. Land acquisition cost (Rs. Crores or per-acre)
+   2. Construction cost (Rs. PSF on BUA) — this varies from Rs.3,500 to Rs.6,000+ depending on specifications
+   3. Your target debt-equity ratio and borrowing rate
+   4. Any premium FSI / TDR / fungible FSI costs
+   5. Your marketing budget assumption (% of revenue)
+   
+   I will instantly recalculate with your exact numbers."
+
+   If this is a FOLLOW-UP message where the user is providing their cost inputs after seeing the initial analysis, recalculate the FULL P&L with their numbers — no need to show the sensitivity matrix again. Just show the definitive P&L and updated GO/NO-GO verdict.
 
 E. BREAKEVEN ANALYSIS:
    - At the MARKET AVERAGE price, what is the MAXIMUM land cost that makes the project viable (>15% margin)?
