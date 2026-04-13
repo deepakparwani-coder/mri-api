@@ -625,6 +625,68 @@ Present this as a SITE SCORECARD TABLE with the specific landmark names, distanc
 **STEP 3 — DEVELOPMENT ECONOMICS (from LF data)**
 Calculate all of these — NEVER skip any line item:
 
+**STEP 2.5 — REGULATORY & TITLE INTELLIGENCE (MANDATORY for Maharashtra/Pune feasibility)**
+
+When the plot is in Maharashtra (Pune, Mumbai, Nagpur, etc.), use web_search to gather regulatory data from government portals. For other states, adapt to local equivalents.
+
+A. ZONING & DEVELOPMENT PLAN VERIFICATION:
+   - Search: "[location] development plan zone PMRDA" or "[location] DP zone PMC"
+   - Portals: pmrda.gov.in, pmc.gov.in, pcmcindia.gov.in
+   - Determine: What zone does the plot fall under (R1, R2, C1, C2, Industrial, etc.)?
+   - What uses are PERMITTED vs RESTRICTED in this zone?
+   - Are there any public reservations (road widening, DP road, garden, school) affecting usable area?
+   - Present as: "**Zoning:** [Zone code] — [Permitted uses]. [Source: web search / user to verify from DP map]"
+
+B. UDCPR / DCR RULES (search and apply):
+   - Search: "UDCPR FSI rules [zone] Maharashtra" or "UDCPR road width FSI table"
+   - Portal: dtp.maharashtra.gov.in
+   - Key rules to extract and apply:
+     * Base FSI for the zone
+     * Premium FSI available (and cost — typically 50% of ready reckoner rate)
+     * TDR loading permitted (and applicable zones)
+     * Road width multiplier — FSI varies by fronting road width (9m, 12m, 18m, 24m, 30m+)
+     * Mandatory deductions: 10% recreational open space, amenity space for plots >4000 sqm
+     * Margin/setback rules by building height
+   - If user has provided FSI in their DCR extract, USE THEIR NUMBER but cross-reference against UDCPR
+   - Present as table:
+     | UDCPR Parameter | Rule | Applied Value | Source |
+     |---|---|---|---|
+     | Base FSI | Zone R2: 1.0 | 1.0 | UDCPR Table 6.2 |
+     | Premium FSI | Max 1.0 additional | +1.0 | UDCPR 6.3 |
+     | TDR | Max 2.0 additional | +2.0 | User DCR input |
+     | Total Effective FSI | | 4.0 | As per user input |
+     | Road Width | 18m+ required for FSI 4.0 | Verify on site | UDCPR Table 6.1 |
+     | Recreational OS | 10% of net plot mandatory | Deducted | UDCPR 15.1 |
+
+C. RERA & PROJECT HISTORY CHECK:
+   - Search: "MahaRERA [developer name] [location]" or "maharerait.maharashtra.gov.in [location]"
+   - Check: Are there existing RERA registrations on this plot or adjacent plots?
+   - Check: Developer's track record — how many projects registered, completion status
+   - Present any findings as: "[Web Context] MahaRERA shows [X] registered projects in [location] by [developer]. Source: maharerait.maharashtra.gov.in"
+
+D. ENVIRONMENTAL & RESTRICTION CHECK:
+   - Search: "[location] NDZ no development zone" or "[location] CRZ flood zone"
+   - Check: Is the plot near any water body, hill slope >1:5, forest boundary, or heritage zone?
+   - Portals: mrsac.gov.in for spatial data
+   - Flag any environmental risks found
+
+E. REGULATORY VERIFICATION CHECKLIST:
+   ALWAYS present this checklist at the end of the regulatory section. Mark items as ✓ (verified via web), ⚠ (partially verified), or ✗ (user must verify manually):
+
+   | Document | Status | Action Required |
+   |---|---|---|
+   | 7/12 Extract (Satbara) | ✗ Not accessible online without survey no. | User to obtain from digitalsatbara.maharashtra.gov.in |
+   | Property Card | ✗ Requires manual lookup | User to obtain from mahabhumi.gov.in |
+   | Bhu Naksha (Plot boundary) | ✗ Requires interactive map | User to verify at mahabhunakasha.mahabhumi.gov.in |
+   | Development Plan Zone | ✓ or ⚠ Checked via web search | [State finding] |
+   | UDCPR FSI Rules | ✓ Cross-referenced | [State applicable FSI] |
+   | Index-II (Transaction history) | ✗ Requires survey number | User to check at freesearchigrservice.maharashtra.gov.in |
+   | Lis Pendens (Litigation) | ✗ Not accessible via search | User to verify at igrmaharashtra.gov.in |
+   | MahaRERA Check | ✓ or ⚠ Searched | [State finding] |
+   | Environmental Clearance | ⚠ Searched for restrictions | [State finding] |
+
+   Then add: "**Critical:** This feasibility is based on the plot parameters provided by you and publicly available regulatory information. Before committing to acquisition, obtain the 7/12 Extract, Property Card, Index-II, and Lis Pendens certificate to verify clear title, absence of encumbrances, and litigation-free status."
+
 **STEP 3 — DEVELOPMENT ECONOMICS**
 
 === CRITICAL: NEVER ASSUME LAND COST OR CONSTRUCTION COST ===
@@ -817,7 +879,16 @@ CRITICAL RULES FOR WEB INTELLIGENCE:
 4. In the source citation footer, add a separate WEB SOURCES section listing each web source used with its URL.
 5. Use web search for: current repo rate, recent infrastructure news for the city, any policy changes affecting real estate, developer earnings if asked, recent land deals.
 6. Do NOT use web search to find property data that contradicts or supplements LF data. If web says Gurgaon avg price is Rs.25,000 PSF but LF data says Rs.20,981 — use LF data and note the difference if relevant.
-7. Maximum 3 web searches per response. Be targeted."""
+7. For FEASIBILITY queries, use up to 8 web searches covering: location surroundings, infrastructure projects, UDCPR/DCR rules, zoning, MahaRERA, metro/highway status, commercial rates if needed. For non-feasibility queries, limit to 3 searches.
+
+REGULATORY PORTAL REFERENCE (for Maharashtra feasibility):
+When searching for regulatory data, target these specific portals:
+- UDCPR/DCR rules: dtp.maharashtra.gov.in — FSI tables, road width multipliers, margin rules
+- Development Plan: pmrda.gov.in (PMRDA area), pmc.gov.in (PMC area), pcmcindia.gov.in (PCMC area)
+- MahaRERA: maharerait.maharashtra.gov.in — project registrations, developer records
+- IGR: igrmaharashtra.gov.in — stamp duty rates, ready reckoner rates
+- Environmental: mrsac.gov.in — spatial restrictions, NDZ zones
+Search queries like "UDCPR FSI table zone R2 Maharashtra" or "MahaRERA registered projects Hinjewadi" will yield relevant results from these portals."""
 
 
 def get_system_prompt(with_web=False):
@@ -911,7 +982,7 @@ def handle_query():
     # Add web search tool if needed
     if web_mode:
         api_params["tools"] = [
-            {"type": "web_search_20250305", "name": "web_search", "max_uses": 5}
+            {"type": "web_search_20250305", "name": "web_search", "max_uses": 8}
         ]
 
     # Step 6: Call Claude
