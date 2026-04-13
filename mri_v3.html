@@ -704,10 +704,12 @@ function xpdf() {
     function flushTable() {
       if (!tableHeaders.length || !tableRows.length) { inTable=false; tableHeaders=[]; tableRows=[]; return; }
       if (doc.autoTable) {
-        np(14 + tableRows.length * 7);
+        // Let AutoTable handle page breaks — just ensure we're not at the very bottom
+        if (y > ph-mb-15) { doc.addPage(); y=mt; }
         doc.autoTable({
           head: [tableHeaders], body: tableRows, startY: y,
-          margin: {left: ml, right: mr}, theme: 'grid',
+          margin: {left: ml, right: mr, top: mt, bottom: mb},
+          theme: 'grid',
           styles: {overflow:'linebreak', cellPadding:{top:2,right:3,bottom:2,left:3}, fontSize:7.5, valign:'middle', textColor:[55,55,55], lineColor:[220,225,232], lineWidth:0.2},
           headStyles: {fillColor:headerBg, textColor:[255,255,255], fontStyle:'bold', fontSize:7.5, halign:'left'},
           alternateRowStyles: {fillColor:altRowBg}, bodyStyles: {fillColor:[255,255,255]},
@@ -718,20 +720,30 @@ function xpdf() {
             if (v==='GO') { data.cell.styles.textColor=[0,128,0]; data.cell.styles.fontStyle='bold'; }
             if (v.indexOf('NO')>=0 && v.indexOf('GO')>=0) { data.cell.styles.textColor=[220,50,50]; data.cell.styles.fontStyle='bold'; }
             if (v.indexOf('CONDITIONAL')>=0) { data.cell.styles.textColor=[200,150,0]; data.cell.styles.fontStyle='bold'; }
-            // Highlight checkmarks
             if (v.indexOf('\u2713')>=0||v.indexOf('\u2714')>=0) data.cell.styles.textColor=[0,128,0];
             if (v.indexOf('\u2717')>=0||v.indexOf('\u2718')>=0) data.cell.styles.textColor=[220,50,50];
             if (v.indexOf('\u26A0')>=0) data.cell.styles.textColor=[200,150,0];
           }
         });
         y = doc.lastAutoTable.finalY + 6;
+      } else {
+        // Fallback: render table as simple text rows
+        np(6);
+        doc.setFontSize(7.5); doc.setFont("helvetica","bold"); doc.setTextColor(55,55,55);
+        doc.text(tableHeaders.join("  |  "), ml, y); y += 5;
+        doc.setFont("helvetica","normal");
+        tableRows.forEach(function(row) {
+          np(4.5);
+          doc.text(row.join("  |  "), ml, y); y += 4.5;
+        });
+        y += 3;
       }
       inTable=false; tableHeaders=[]; tableRows=[];
     }
 
     lines.forEach(function(line) {
       var tr = line.trim();
-      if (!tr) { y += 2; return; }
+      if (!tr) { if (y < ph-mb-20) y += 1.5; return; }
       if (tr.indexOf("<lfchart")>=0||tr.indexOf("</lfchart")>=0||tr.indexOf("<labels>")>=0||tr.indexOf("<dataset")>=0||tr.indexOf("</dataset")>=0) return;
 
       // CHART
