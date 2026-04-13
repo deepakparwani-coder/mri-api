@@ -708,7 +708,7 @@ B. REVENUE PROJECTION (use LF price data from the micromarket):
    - Show revenue at 3 price points: Market Average, Market Average +10%, Market Average +20%
    - Residential Revenue = Saleable Area × Price PSF
    - If mixed-use: Commercial Revenue = Commercial Saleable × Commercial PSF
-   - Net Revenue = Gross × 0.95 (5% brokerage + stamp duty absorption)
+   - Show GROSS revenue only. Do NOT deduct brokerage, stamp duty absorption, or any sales cost from revenue. These are cost items and belong in the cost structure section.
 
 C. LAND COST SENSITIVITY MATRIX (instead of guessing):
    Present this table showing profitability at DIFFERENT land costs:
@@ -723,10 +723,12 @@ C. LAND COST SENSITIVITY MATRIX (instead of guessing):
 
    Use construction cost of Rs. 4,000 PSF for Pune, Rs. 4,500 for Gurgaon, Rs. 3,500 for Kolkata as DEFAULT but state the assumption clearly.
    
-   Then say: "To refine this analysis with your actual land acquisition cost and construction estimates, please share:
+   Then say: "To refine this analysis with your actual numbers, please share:
    1. Land cost (total Rs. Crores or per-acre rate)
    2. Expected construction cost (Rs. PSF on BUA)
    3. Any premium FSI or TDR costs applicable
+   4. Brokerage/channel partner commission (% of revenue — varies: 0% direct sales, 2-4% channel partners)
+   5. Stamp duty absorption if any (Maharashtra: 5-6% of unit value)
    I will recalculate the full P&L with your exact numbers."
 
 D. COST STRUCTURE — USER INPUTS FIRST:
@@ -737,10 +739,15 @@ D. COST STRUCTURE — USER INPUTS FIRST:
    |---|---|---|---|
    | Land Cost | MUST ASK if not provided | Show sensitivity matrix | Most critical input |
    | Construction Cost PSF | Use if provided | Rs.4,000 Pune, Rs.4,500 Gurgaon, Rs.3,500 Kolkata | Varies by developer — Godrej/Lodha: Rs.5,500+, Local: Rs.3,500 |
+   | Premium FSI / TDR Cost | Use if provided | Exclude if not mentioned | Maharashtra: typically 50% of ready reckoner rate |
    | Approvals & Statutory % | Use if provided | 10% of construction | Varies by state — MH higher than HR |
+   | Brokerage / Channel Partner % | Use if provided | DO NOT ASSUME — show as separate line item at 0% | Ranges 0% (direct sales) to 4% (heavy channel dependence) |
+   | Stamp Duty Absorption | Use if provided | DO NOT ASSUME — show as separate line item at 0% | Some developers absorb 5-7% stamp duty as sales incentive |
    | Marketing & Sales % | Use if provided | 4% of revenue | Brand developers spend less (2-3%), new entrants more (5-6%) |
    | Finance Cost % | Use if provided | 13% on 60% of project cost | Depends on debt-equity ratio, developer's borrowing rate |
    | Contingency % | Use if provided | 5% of total cost | Standard buffer |
+
+   CRITICAL: For Brokerage and Stamp Duty Absorption — these are DEVELOPER DECISIONS, not industry defaults. Show them as Rs.0 in the base case. Add a note: "Brokerage and stamp duty absorption not included — add your % if applicable. At 3% brokerage + 5% stamp duty absorption, total revenue reduces by 8% (Rs.X Crores impact)." Show the IMPACT, not the assumed number.
 
    ALWAYS present the defaults table with a note:
    "**Assumptions Used:** The above uses industry-standard cost assumptions for [city]. Your actual costs may differ significantly. To get a precise P&L, share your:
@@ -749,6 +756,8 @@ D. COST STRUCTURE — USER INPUTS FIRST:
    3. Your target debt-equity ratio and borrowing rate
    4. Any premium FSI / TDR / fungible FSI costs
    5. Your marketing budget assumption (% of revenue)
+   6. Brokerage / channel partner commission (% of revenue)
+   7. Whether you plan to absorb stamp duty (partial/full)
    
    I will instantly recalculate with your exact numbers."
 

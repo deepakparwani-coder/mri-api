@@ -51,9 +51,9 @@ html,body{height:100%;height:100dvh;overflow:hidden;background:#FAF9F6;color:#1a
 .m.u .bbl strong,.m.u .bbl b{color:#fde68a}
 .bbl h3{color:#1a1a2e;font-size:14px;font-weight:700;margin:14px 0 6px;padding-left:12px;border-left:3px solid #C9A84C}
 .bbl h4{color:#8C8578;font-size:10px;font-weight:700;margin:10px 0 4px;text-transform:uppercase;letter-spacing:1px}
-.bbl table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13px;border:1px solid #E8E4DE;border-radius:8px;overflow:hidden}
-.bbl th{background:#F5F3EF;color:#6B6560;font-weight:600;padding:9px 12px;text-align:left;border-bottom:1px solid #E8E4DE;font-size:10px;text-transform:uppercase;letter-spacing:.5px}
-.bbl td{padding:8px 12px;border-bottom:1px solid #F0EDE8;font-variant-numeric:tabular-nums;color:#374151}
+.bbl table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13px;border:1px solid #E8E4DE;border-radius:8px;overflow:hidden;table-layout:auto;word-wrap:break-word}
+.bbl th{background:#F5F3EF;color:#6B6560;font-weight:600;padding:9px 12px;text-align:left;border-bottom:1px solid #E8E4DE;font-size:10px;text-transform:uppercase;letter-spacing:.5px;word-wrap:break-word;max-width:200px}
+.bbl td{padding:8px 12px;border-bottom:1px solid #F0EDE8;font-variant-numeric:tabular-nums;color:#374151;word-wrap:break-word;max-width:250px}
 .bbl tr:last-child td{border:none}
 .bbl tr:hover td{background:#FBF8F1}
 .bbl ul{padding-left:18px;margin:6px 0}.bbl li{margin:4px 0;font-size:13px;color:#374151}
@@ -766,33 +766,43 @@ function xpdf() {
         // TABLE
         if (trimmed.indexOf("|") === 0 && trimmed.lastIndexOf("|") > 0) {
           if (/^\|[\s\-:|]+\|$/.test(trimmed)) return; // skip separator
-          np(6);
           var cells = trimmed.split("|").filter(function(c) { return c.trim() !== ""; });
           var numCols = cells.length;
-          // Calculate column widths based on content
+          
+          // Smart column width: use full content width, distribute evenly
           var colW = cw / numCols;
-          // Cap column width at reasonable size
-          if (colW > 45) colW = 45;
+          // For many columns, reduce font size
+          var tblFontSize = numCols <= 4 ? 8 : (numCols <= 6 ? 7 : 6.5);
+          
+          // Calculate row height based on longest cell content with wrapping
+          var maxLines = 1;
+          var cellWrapped = [];
+          doc.setFontSize(tblFontSize);
+          cells.forEach(function(cell) {
+            var cellText = cell.trim().replace(/\*\*/g, "").replace(/\u20B9/g, "Rs.").replace(/\u00B9/g, "Rs.");
+            var lines = doc.splitTextToSize(cellText, colW - 4);
+            cellWrapped.push(lines);
+            if (lines.length > maxLines) maxLines = lines.length;
+          });
+          var rowH = Math.max(6, maxLines * 3.8 + 2);
+          
+          np(rowH + 1);
 
           // Row background
           doc.setFillColor(248,249,252);
-          doc.rect(ml, y-3, cw, 6, "F");
+          doc.rect(ml, y-3, cw, rowH, "F");
           doc.setDrawColor(235,237,242); doc.setLineWidth(0.1);
-          doc.line(ml, y+3, ml+cw, y+3);
+          doc.line(ml, y-3+rowH, ml+cw, y-3+rowH);
 
-          cells.forEach(function(cell, ci3) {
-            var cellText = cell.trim().replace(/\*\*/g, "");
-            // Fix rupee symbol
-            cellText = cellText.replace(/\u20B9/g, "Rs.").replace(/\u00B9/g, "Rs.");
+          cellWrapped.forEach(function(lines, ci3) {
             doc.setTextColor(bodyText[0],bodyText[1],bodyText[2]);
-            doc.setFontSize(7.5);
+            doc.setFontSize(tblFontSize);
             doc.setFont("helvetica", ci3===0 ? "bold" : "normal");
-            // Truncate long cells
-            var maxLen = Math.floor(colW / 1.8);
-            if (cellText.length > maxLen) cellText = cellText.substring(0, maxLen-1)+"..";
-            doc.text(cellText, ml + ci3*colW + 2, y);
+            lines.forEach(function(ln, li) {
+              doc.text(ln, ml + ci3*colW + 2, y + li*3.8);
+            });
           });
-          y += 6;
+          y += rowH - 2;
           return;
         }
 
