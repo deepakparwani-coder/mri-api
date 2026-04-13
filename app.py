@@ -766,18 +766,102 @@ D. COST STRUCTURE — USER INPUTS FIRST:
 E. BREAKEVEN ANALYSIS:
    - At the MARKET AVERAGE price, what is the MAXIMUM land cost that makes the project viable (>15% margin)?
    - At the user's TARGET price (if mentioned), what is the breakeven land cost?
-   - This is the MOST useful number for a land acquisition head — it tells them their walk-away price.
+   - Breakeven units: Total Cost / Revenue per unit = minimum units to sell before profit
+   - Breakeven timeline: Breakeven units / monthly absorption rate (from LF velocity data) = months to breakeven
 
-F. SENSITIVITY ANALYSIS (MANDATORY — present as table):
-   Show a 3×3 matrix combining price scenarios AND land cost scenarios:
+F. SENSITIVITY ANALYSIS (MANDATORY — present as 3×3 matrix):
    
    | | Land @ Rs.100 Cr | Land @ Rs.175 Cr | Land @ Rs.250 Cr |
    |---|---|---|---|
-   | Price Rs.7,000 PSF (-15%) | Margin % | Margin % | Margin % |
-   | Price Rs.8,200 PSF (Base) | Margin % | Margin % | Margin % |
-   | Price Rs.9,500 PSF (+15%) | Margin % | Margin % | Margin % |
+   | Price -15% | Margin % | Margin % | Margin % |
+   | Price Base | Margin % | Margin % | Margin % |
+   | Price +15% | Margin % | Margin % | Margin % |
+
+G. PHASED CASH FLOW MODEL (MANDATORY for feasibility):
+   Model a 5-year project lifecycle with quarterly cash flows. Use this EXACT structure:
+
+   ASSUMPTIONS (state clearly):
+   - Total project duration: 5 years (20 quarters)
+   - Phasing: Phase 1 = 40% of saleable area, Phase 2 = 35%, Phase 3 = 25%
+   - Phase 1 launch: Quarter 1, Phase 2: Quarter 8, Phase 3: Quarter 14
+   - Monthly absorption rate: Use LF market velocity (e.g., 3-5% of launched inventory per month)
+   - Price escalation: 5-7% per annum (use LF historical price CAGR if available)
+   - Construction spend profile: 20% Year 1, 30% Year 2, 30% Year 3, 15% Year 4, 5% Year 5
+   - Land payment: 100% in Year 0 (or as user specifies)
+   - Collections: 20% on booking, 60% construction-linked, 20% on possession
+
+   CASH FLOW TABLE (present year-wise):
+   | Year | Revenue Booked | Collections | Construction Spend | Other Costs | Net Cash Flow | Cumulative Cash Flow |
+   |---|---|---|---|---|---|---|
+   | Year 0 (Land) | 0 | 0 | 0 | Land Cost | -(Land) | -(Land) |
+   | Year 1 | [calc] | [calc] | [calc] | [calc] | [calc] | [calc] |
+   | Year 2 | [calc] | [calc] | [calc] | [calc] | [calc] | [calc] |
+   | Year 3 | [calc] | [calc] | [calc] | [calc] | [calc] | [calc] |
+   | Year 4 | [calc] | [calc] | [calc] | [calc] | [calc] | [calc] |
+   | Year 5 | [calc] | [calc] | [calc] | [calc] | [calc] | [calc] |
+   | TOTAL | [sum] | [sum] | [sum] | [sum] | [sum] | Final Surplus/Deficit |
+
+   HOW TO CALCULATE EACH YEAR:
+   - Revenue Booked = Units sold in year × Average selling price per unit
+   - Units sold = Total launched units × monthly velocity × 12 months (capped at available inventory)
+   - Collections = Revenue from previous bookings flowing in per collection schedule
+   - Construction Spend = Total construction cost × spend profile %
+   - Other Costs = Approvals + Marketing + Finance cost for that year
+
+H. IRR CALCULATION (MANDATORY):
+   Using the year-wise net cash flows from section G:
    
-   This 3×3 matrix lets the CXO immediately see which price-land combinations work.
+   IRR = the discount rate at which NPV of all cash flows = 0
+   
+   Calculate IRR using this approach:
+   - Cash flow Year 0: -(Land cost + Year 0 expenses) [NEGATIVE — this is the investment]
+   - Cash flow Year 1-5: Net cash flow per year from the table above
+   - State: "Project IRR: X% — this represents the annualized return on equity deployed"
+   
+   IRR BENCHMARKS for real estate:
+   - Below 15%: WEAK — doesn't justify the risk and capital lock-in
+   - 15-20%: MODERATE — acceptable for low-risk locations with strong demand
+   - 20-25%: STRONG — good risk-adjusted return
+   - Above 25%: EXCELLENT — proceed aggressively
+   
+   If land cost is not provided, show IRR at 3 different land costs:
+   | Land Cost | Project IRR | Equity Multiple | Verdict |
+   |---|---|---|---|
+   | Rs.X Cr (low) | XX% | X.Xx | GO |
+   | Rs.Y Cr (mid) | XX% | X.Xx | CONDITIONAL |
+   | Rs.Z Cr (high) | XX% | X.Xx | NO-GO |
+
+I. NPV CALCULATION:
+   NPV = Sum of [Cash Flow(t) / (1 + discount_rate)^t] for t = 0 to 5
+   
+   Use discount rate = 15% (typical developer's cost of capital in India)
+   - If NPV > 0: Project creates value — GO
+   - If NPV < 0: Project destroys value — NO-GO
+   - State NPV in Rs. Crores
+   
+   Also show NPV at 12%, 15%, 18% discount rates to show sensitivity to cost of capital.
+
+J. EQUITY MULTIPLE:
+   Equity Multiple = Total cash inflows / Total equity invested
+   - Equity = Land cost + 40% of construction cost (assuming 60% debt)
+   - A multiple of 1.5x means the developer gets back 1.5x their equity
+   - Below 1.5x: WEAK. 1.5-2.0x: MODERATE. Above 2.0x: STRONG.
+
+K. ABSORPTION SCENARIO MODELING (3 scenarios):
+   Model the SAME project under 3 different absorption rates:
+   
+   | Metric | Pessimistic | Base Case | Optimistic |
+   |---|---|---|---|
+   | Monthly Velocity | LF market avg -30% | LF market avg | LF market avg +20% |
+   | Sellout Timeline | X months | X months | X months |
+   | Revenue (with escalation) | Rs.X Cr | Rs.X Cr | Rs.X Cr |
+   | IRR | X% | X% | X% |
+   | NPV @ 15% | Rs.X Cr | Rs.X Cr | Rs.X Cr |
+   | Equity Multiple | X.Xx | X.Xx | X.Xx |
+   | Breakeven Month | Month X | Month X | Month X |
+   
+   Use LF velocity data as the BASE CASE. Pessimistic = 30% slower absorption. Optimistic = 20% faster.
+   This is the MOST VALUABLE table in the entire report — it shows the CXO what happens if the market slows down.
 
 **STEP 4 — COMPETITIVE POSITIONING (from LF data)**
 - Pull ALL projects from the same micromarket using the comparable_projects data
@@ -786,33 +870,118 @@ F. SENSITIVITY ANALYSIS (MANDATORY — present as table):
 - Identify CONFIGURATION GAPS — BHK types undersupplied
 - Show velocity leaders as benchmarks for what sells
 
-**STEP 5 — DEVELOPMENT SCENARIO ANALYSIS (MANDATORY — always show multiple options)**
+**STEP 5 — DEVELOPMENT MIX OPTIMIZER (CRITICAL — never default to single-use)**
 
-NEVER recommend only one development type. Always present at least 2 scenarios so the CXO can compare:
+=== TRIGGER LOGIC ===
+ALWAYS run the Development Mix Optimizer when ANY of these conditions exist:
+- FSI > 2.5 (UDCPR residential cap is typically 2.5-3.0 — excess FSI MUST go to non-residential)
+- User mentions "commercial" in DCR/parking norms
+- Plot is in IT corridor (Hinjewadi, Whitefield, Gurgaon Cyber City, etc.)
+- Plot area > 5 acres (large plots almost always need mixed-use for optimal returns)
+- User explicitly asks about mixed-use or commercial potential
 
-**SCENARIO A — PURE RESIDENTIAL (use LF data for pricing):**
-- Revenue PSF: Use LF weighted average saleable price (from SALEABLE_PRICE_AT data)
-- Revenue calculation using LF residential pricing — this is the MOST reliable scenario because LF data directly supports it
-- Configuration mix from flat_performance data
+=== UDCPR FSI CONSTRAINT CHECK (Maharashtra) ===
+Before recommending any development mix, CHECK the FSI limits:
+- UDCPR Table 6-G: Basic residential FSI = 1.10. Max building potential with premium + TDR:
+  * Road <9m: 1.10 | Road 9-12m: 2.00 | Road 12-15m: 2.25 | Road 15-24m: 2.50 | Road 24-30m: 2.75 | Road 30m+: 3.00
+- If user's FSI EXCEEDS the residential max for their road width → the excess MUST be commercial/IT/institutional
+- Chapter 7 allows up to FSI 5.0 for commercial in CBD/commercial zones at 50% ASR premium
+- Ancillary FSI: 60% additional for residential, 80% for commercial (on payment of premium)
+- FLAG clearly: "Your total FSI of 4.0 exceeds the UDCPR residential limit of [X] for [road width]. The excess [Y] FSI should be allocated to commercial/IT/institutional use."
+
+=== DEVELOPMENT MIX TABLE (MANDATORY) ===
+Present this table showing how FSI is allocated across components:
+
+| Component | FSI Allocated | BUA (sqft) | Saleable Area | Revenue Model | Pricing Source |
+|---|---|---|---|---|---|
+| Residential (sale) | [max allowed under UDCPR] | [calc] | [×70%] | Sale @ Rs.X PSF | LF Data |
+| IT/Commercial Offices | [allocated] | [calc] | [×75%] | Sale or Lease @ Rs.Y PSF | [Web Context] |
+| Co-working Spaces | [allocated] | [calc] | [×85%] | Rs.X/seat/month × Y seats | [Web Context] |
+| Co-living / Serviced Apts | [allocated] | [calc] | [×80%] | Rs.X/bed/month × Y beds | [Web Context] |
+| Retail (ground floor) | [allocated] | [calc] | [×85%] | Sale or Lease @ Rs.Z PSF | [Web Context] |
+| **TOTAL** | **[must equal user's FSI]** | **[total BUA]** | | | |
+
+=== REVENUE MODEL — SALE vs LEASE vs HYBRID ===
+For each non-residential component, show THREE revenue approaches:
+
+**Option 1 — FULL SALE (maximize upfront cash):**
+- Sell everything including commercial floors
+- Highest upfront revenue, fastest capital recovery
+- Revenue = Saleable area × Sale PSF for each component
+- IRR typically higher, equity multiple faster
+
+**Option 2 — HYBRID (sell residential, lease commercial):**
+- SELL: Residential units (immediate cash flow from LF-backed pricing)
+- LEASE: Commercial/co-working/retail (recurring revenue stream)
+- This is how most large mixed-use developments work in India
+- Show: Year 1-5 residential sale collections + annual lease income from commercial
+- Lease yield: [Web Context] Hinjewadi office lease rates Rs.X-Y per sqft/month
+- Annual lease income = Leasable area × monthly rent × 12 × occupancy rate (85%)
+- Cap rate valuation: Annual lease income / cap rate (7-9%) = asset value at Year 5
+
+**Option 3 — FULL LEASE (maximize long-term wealth):**
+- Lease everything including residential (co-living model)
+- Lower upfront but builds annuity income
+- Requires higher equity / patient capital
+- Show annual rental income, stabilized yield, asset valuation at Year 5 and Year 10
+
+=== COMPONENT-SPECIFIC GUIDANCE ===
+
+**RESIDENTIAL (from LF data — HIGH confidence):**
+- Use LF weighted average price for the micromarket
+- Configuration mix from flat_performance (which BHK has highest velocity)
+- Ticket size from ticket_size data (which price band has best absorption)
+- Unit sizes from unit_size data
 - Absorption rate from LF velocity data
-- Label: "Pricing based on LF Research Database — HIGH confidence"
+- ALL numbers from LF — label clearly
 
-**SCENARIO B — MIXED-USE (Residential + Commercial):**
-- Residential component: Use LF data pricing (state the exact PSF from data)
-- Commercial component: Use web_search for local commercial rates — MUST label [Web Context] with source
-- Split assumption: State the assumed residential-commercial ratio (e.g., 70-30 or 60-40)
-- Label residential numbers as "LF Data" and commercial numbers as "[Web Context]"
+**IT OFFICES / COMMERCIAL (from web — label [Web Context]):**
+- Search: "[location] office space lease rate per sqft"
+- Search: "[location] commercial property sale rate"
+- Typical metrics: Rs.50-100/sqft/month lease in IT corridors, Rs.8,000-15,000 PSF sale
+- Demand driver: IT employee count in catchment, vacancy rate
+- Pre-lease potential: Anchor tenant strategy
 
-**SCENARIO C — PURE COMMERCIAL (only if plot zoning demands it):**
-- ALL pricing from web_search — label EVERY number [Web Context]
-- State explicitly: "LF database does not cover commercial real estate. All commercial pricing below is from web intelligence."
-- Include office, co-working, retail sub-segments with separate PSF
-- Label: "Pricing based on Web Intelligence — MODERATE confidence, verify with local brokers"
+**CO-WORKING (from web — label [Web Context]):**
+- Search: "[location] co-working space rates per seat"
+- Revenue model: Per seat/month × total seats × occupancy
+- Typical: Rs.5,000-15,000/seat/month depending on city and location
+- Seat density: 1 seat per 60-80 sqft of carpet area
+- Occupancy assumption: 70% Year 1, 85% Year 2+
+- Operators: WeWork, Awfis, 91springboard, Smartworks — can lease to operator or self-operate
 
-For EACH scenario, show: Revenue, Cost, Margin, Breakeven Land Cost, and a GO/NO-GO.
-This lets the CXO see which development type maximizes returns for their specific land cost.
+**CO-LIVING / SERVICED APARTMENTS (from web — label [Web Context]):**
+- Search: "[location] co-living rates per bed per month"
+- Revenue model: Per bed/month × total beds × occupancy
+- Typical: Rs.8,000-25,000/bed/month in IT corridors
+- Bed density: 1 bed per 100-150 sqft carpet (shared) or 200-300 sqft (studio)
+- Occupancy: 80% Year 1, 90% Year 2+
+- Target: Young IT professionals, single occupants, new joiners
+- Operators: Stanza Living, Zolo, CoHo — can lease to operator at guaranteed rent
 
-**CONFIGURATION RECOMMENDATION (from LF residential data):**
+**RETAIL (from web — label [Web Context]):**
+- Typically ground floor and first floor only
+- Search: "[location] retail shop rates per sqft"
+- Revenue: Sale at premium to residential (typically 1.5-2x) or lease at Rs.80-200/sqft/month
+- Keep at 5-10% of total BUA — serves the residential and commercial population
+
+=== OPTIMAL MIX RECOMMENDATION ===
+After presenting the mix table, recommend the OPTIMAL allocation with reasoning:
+
+"**Recommended Development Mix for [location]:**
+Based on UDCPR FSI limits, LF residential market data, and [location] commercial demand:
+- Residential: X% (FSI Y) — [reasoning from LF data]
+- Commercial/IT: X% (FSI Y) — [reasoning: IT corridor demand, FSI utilization]
+- Co-working/Co-living: X% (FSI Y) — [reasoning: employee catchment, rental yield]
+- Retail: X% (FSI Y) — [reasoning: serves captive population]
+
+This mix achieves:
+- Total Revenue: Rs.X Cr (vs Rs.Y Cr pure residential — Z% higher)
+- Blended IRR: X% (vs Y% pure residential)
+- Annual rental income post-stabilization: Rs.X Cr/year from lease components
+- Asset valuation at Year 5: Rs.X Cr (from cap rate on lease income)"
+
+=== CONFIGURATION RECOMMENDATION (from LF residential data — for residential component only) ===
 - Recommended BHK mix (from flat_performance — which BHK has highest velocity)
 - Recommended ticket size (from ticket_size data — which price band has best absorption)
 - Recommended unit sizes (from unit_size data)
@@ -988,10 +1157,11 @@ def handle_query():
         "messages": messages,
     }
 
-    # Add web search tool if needed
+    # Add web search tool if needed — limit uses to prevent timeout
     if web_mode:
+        web_uses = 5 if is_feasibility else 3
         api_params["tools"] = [
-            {"type": "web_search_20250305", "name": "web_search", "max_uses": 8}
+            {"type": "web_search_20250305", "name": "web_search", "max_uses": web_uses}
         ]
 
     # Step 6: Call Claude
