@@ -618,251 +618,202 @@ function rcharts(bub) {
 
 // ── PDF ──// ── PDF ──
 function xpdf() {
+// ── PDF ── Professional Report Generator with jsPDF-AutoTable
+function xpdf() {
   if (!hist.length) { alert("No conversation to export."); return; }
   if (!window.jspdf) {
-    var s = document.createElement("script");
-    s.src = "https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js";
-    s.onload = function() { xpdf(); };
-    s.onerror = function() { alert("Cannot load PDF library."); };
-    document.head.appendChild(s);
+    var s1 = document.createElement("script");
+    s1.src = "https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js";
+    s1.onload = function() {
+      var s2 = document.createElement("script");
+      s2.src = "https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js";
+      s2.onload = function() { xpdf(); };
+      s2.onerror = function() { xpdf(); };
+      document.head.appendChild(s2);
+    };
+    s1.onerror = function() { alert("Cannot load PDF library."); };
+    document.head.appendChild(s1);
     return;
   }
   var jsPDF = window.jspdf.jsPDF;
-  var doc = new jsPDF({unit:"mm",format:"a4"});
-  var pw=210, ph=297, ml=20, mr=20, cw=pw-ml-mr;
-  var y=0;
+  var doc = new jsPDF({unit:"mm", format:"a4", compress:true});
+  var pw=210, ph=297, ml=20, mr=20, mt=28, mb=22, cw=pw-ml-mr;
+  var y = 0;
   var dateStr = new Date().toLocaleDateString("en-IN",{day:"numeric",month:"long",year:"numeric"});
-  var navy=[15,23,42], gold=[180,150,60], blue=[37,99,235];
-  var darkText=[30,30,30], bodyText=[55,55,55], lightText=[120,120,120];
+  var navy=[15,23,42], gold=[180,150,60], blue=[37,99,235], teal=[0,150,136];
+  var darkText=[30,30,30], bodyText=[55,55,55], lightText=[130,130,130];
+  var headerBg=[0,51,89], altRowBg=[245,247,250];
 
-  function np(need) { if (y+need > ph-28) { y=18; doc.addPage(); return true; } return false; }
+  function np(need) { if (y+need > ph-mb-5) { doc.addPage(); y=mt; return true; } return false; }
 
-  // Collect chart images from DOM
+  // Collect chart images
   var chartImgs = [];
-  var canvases = document.querySelectorAll(".m.b canvas");
-  for (var ci2 = 0; ci2 < canvases.length; ci2++) {
-    try { chartImgs.push(canvases[ci2].toDataURL("image/png")); } catch(e) {}
-  }
-  var gci = 0;
-
-  // === COVER ===
-  doc.setFillColor(navy[0],navy[1],navy[2]);
-  doc.rect(0, 0, pw, 48, "F");
-  doc.setFillColor(gold[0],gold[1],gold[2]);
-  doc.rect(0, 48, pw, 1.2, "F");
-  doc.setTextColor(255,255,255); doc.setFontSize(20); doc.setFont("helvetica","bold");
-  doc.text("Market Research & Intelligence", ml, 20);
-  doc.setFontSize(11); doc.setFont("helvetica","normal"); doc.setTextColor(180,190,210);
-  doc.text(CC + " \u2014 Real Estate Intelligence Report", ml, 30);
-  doc.setFontSize(9); doc.setTextColor(140,155,180);
-  doc.text(dateStr, ml, 40);
-  doc.setFillColor(gold[0],gold[1],gold[2]);
-  doc.roundedRect(pw-mr-30, 34, 30, 7, 1.5, 1.5, "F");
-  doc.setFontSize(6.5); doc.setTextColor(15,23,42); doc.setFont("helvetica","bold");
-  doc.text("CONFIDENTIAL", pw-mr-15, 38.5, {align:"center"});
-
-  y = 58;
-  doc.setFontSize(8); doc.setTextColor(lightText[0],lightText[1],lightText[2]); doc.setFont("helvetica","normal");
-  doc.text("This report contains " + Math.floor(hist.length/2) + " queries and responses generated from proprietary market research data.", ml, y);
-  y += 10;
-
-  // === CONTENT ===
-  var qNum = 0;
-  hist.forEach(function(msg, idx) {
-    if (msg.role === "user") {
-      qNum++;
-      np(20);
-      // Query header bar
-      doc.setFillColor(navy[0],navy[1],navy[2]);
-      doc.roundedRect(ml, y, cw, 8, 1.5, 1.5, "F");
-      doc.setTextColor(gold[0],gold[1],gold[2]); doc.setFontSize(7); doc.setFont("helvetica","bold");
-      doc.text("QUERY " + qNum, ml+4, y+5.5);
-      doc.setTextColor(255,255,255); doc.setFontSize(7); doc.setFont("helvetica","normal");
-      var shortQ = typeof msg.content === "string" ? msg.content : "Query";
-      if (shortQ.length > 85) shortQ = shortQ.substring(0,82)+"...";
-      doc.text(shortQ, ml+24, y+5.5);
-      y += 12;
-      // Full query
-      doc.setTextColor(darkText[0],darkText[1],darkText[2]); doc.setFontSize(10); doc.setFont("helvetica","bold");
-      var content = typeof msg.content === "string" ? msg.content : "Query";
-      var qLines = doc.splitTextToSize(content, cw);
-      qLines.forEach(function(ln) { np(5); doc.text(ln, ml, y); y += 5; });
-      y += 4;
-
-    } else {
-      np(10);
-      // Analysis label
-      doc.setFillColor(237,242,252);
-      doc.roundedRect(ml, y, cw, 7, 1.5, 1.5, "F");
-      doc.setTextColor(blue[0],blue[1],blue[2]); doc.setFontSize(7); doc.setFont("helvetica","bold");
-      doc.text("ANALYSIS", ml+4, y+5);
-      y += 11;
-
-      // Clean and process text
-      var txt = typeof msg.content === "string" ? msg.content : "";
-
-      // Strip chart tags
-      txt = txt.replace(/<lfchart[\s\S]*?<\/lfchart>/g, "%%CHART%%");
-
-      // CRITICAL: Clean all artifacts before processing
-      txt = txt.replace(/[\u00B6\u00A7\u00B0\u2020\u2021\u25B6]/g, "");  // strip ¶ § ° † ‡ ▶
-      txt = txt.replace(/%\u00B6/g, "");          // strip %¶
-      txt = txt.replace(/%[^\w\s%.]/g, "");       // strip %<special>
-      txt = txt.replace(/\u20B9/g, "Rs.");         // ₹ → Rs.
-      txt = txt.replace(/\u00B9/g, "Rs.");         // ¹ → Rs.
-
-      var lines = txt.split("\n");
-
-      lines.forEach(function(line) {
-        var trimmed = line.trim();
-        if (!trimmed) { y += 2; return; }
-
-        // CHART
-        if (trimmed.indexOf("%%CHART%%") >= 0) {
-          if (gci < chartImgs.length) {
-            np(60);
-            var imgW = cw * 0.85;  // NOT full width — 85%
-            var imgH = imgW * 0.42;
-            var imgX = ml + (cw - imgW) / 2;  // center
-            doc.setDrawColor(220,225,232); doc.setLineWidth(0.2);
-            doc.roundedRect(imgX-1, y-1, imgW+2, imgH+2, 1.5, 1.5, "S");
-            doc.addImage(chartImgs[gci], "PNG", imgX, y, imgW, imgH);
-            y += imgH + 5;
-            gci++;
-          }
-          var rem = trimmed.replace(/%%CHART%%/g, "").trim();
-          if (rem) {
-            rem = rem.replace(/\*\*/g, "");
-            doc.setTextColor(bodyText[0],bodyText[1],bodyText[2]); doc.setFontSize(9); doc.setFont("helvetica","normal");
-            var rl = doc.splitTextToSize(rem, cw);
-            rl.forEach(function(r2) { np(4.5); doc.text(r2, ml, y); y += 4.5; });
-          }
-          return;
-        }
-
-        // HEADER: ### or **bold on own line**
-        if (/^#{1,4}\s/.test(trimmed) || (/^\*\*[^*]+\*\*$/.test(trimmed) && trimmed.length < 80)) {
-          np(8);
-          var hText = trimmed.replace(/^#{1,4}\s*/, "").replace(/\*\*/g, "");
-          y += 2;
-          doc.setFillColor(gold[0],gold[1],gold[2]);
-          doc.rect(ml, y-3.5, 1.2, 5, "F");
-          doc.setTextColor(navy[0],navy[1],navy[2]); doc.setFontSize(10); doc.setFont("helvetica","bold");
-          var hLines = doc.splitTextToSize(hText, cw-6);
-          hLines.forEach(function(hl) { np(5); doc.text(hl, ml+4, y+0.5); y += 5; });
-          y += 3;
-          return;
-        }
-
-        // HORIZONTAL RULE / SOURCE BLOCK DIVIDER
-        if (/^---$/.test(trimmed)) {
-          np(4);
-          doc.setDrawColor(220,225,232); doc.setLineWidth(0.3);
-          doc.line(ml, y, ml+cw, y);
-          y += 4;
-          return;
-        }
-
-        // TABLE
-        if (trimmed.indexOf("|") === 0 && trimmed.lastIndexOf("|") > 0) {
-          if (/^\|[\s\-:|]+\|$/.test(trimmed)) return; // skip separator
-          var cells = trimmed.split("|").filter(function(c) { return c.trim() !== ""; });
-          var numCols = cells.length;
-          
-          // Smart column width: use full content width, distribute evenly
-          var colW = cw / numCols;
-          // For many columns, reduce font size
-          var tblFontSize = numCols <= 4 ? 8 : (numCols <= 6 ? 7 : 6.5);
-          
-          // Calculate row height based on longest cell content with wrapping
-          var maxLines = 1;
-          var cellWrapped = [];
-          doc.setFontSize(tblFontSize);
-          cells.forEach(function(cell) {
-            var cellText = cell.trim().replace(/\*\*/g, "").replace(/\u20B9/g, "Rs.").replace(/\u00B9/g, "Rs.");
-            var lines = doc.splitTextToSize(cellText, colW - 4);
-            cellWrapped.push(lines);
-            if (lines.length > maxLines) maxLines = lines.length;
-          });
-          var rowH = Math.max(6, maxLines * 3.8 + 2);
-          
-          np(rowH + 1);
-
-          // Row background
-          doc.setFillColor(248,249,252);
-          doc.rect(ml, y-3, cw, rowH, "F");
-          doc.setDrawColor(235,237,242); doc.setLineWidth(0.1);
-          doc.line(ml, y-3+rowH, ml+cw, y-3+rowH);
-
-          cellWrapped.forEach(function(lines, ci3) {
-            doc.setTextColor(bodyText[0],bodyText[1],bodyText[2]);
-            doc.setFontSize(tblFontSize);
-            doc.setFont("helvetica", ci3===0 ? "bold" : "normal");
-            lines.forEach(function(ln, li) {
-              doc.text(ln, ml + ci3*colW + 2, y + li*3.8);
-            });
-          });
-          y += rowH - 2;
-          return;
-        }
-
-        // NUMBERED LIST
-        if (/^\d+\.\s/.test(trimmed)) {
-          np(5);
-          var numMatch = trimmed.match(/^(\d+)\.\s(.*)/);
-          var numText = numMatch ? numMatch[2].replace(/\*\*/g, "") : trimmed;
-          var numLabel = numMatch ? numMatch[1] + "." : "";
-          doc.setTextColor(gold[0],gold[1],gold[2]); doc.setFontSize(9); doc.setFont("helvetica","bold");
-          doc.text(numLabel, ml+1, y);
-          doc.setTextColor(bodyText[0],bodyText[1],bodyText[2]); doc.setFontSize(9); doc.setFont("helvetica","normal");
-          var nLines = doc.splitTextToSize(numText, cw-10);
-          nLines.forEach(function(nl2) { np(4.5); doc.text(nl2, ml+8, y); y += 4.5; });
-          y += 1;
-          return;
-        }
-
-        // BULLET POINTS
-        if (/^[\-\*\u2022]\s/.test(trimmed)) {
-          np(5);
-          var bText = trimmed.replace(/^[\-\*\u2022]\s*/, "").replace(/\*\*/g, "");
-          bText = bText.replace(/\u20B9/g, "Rs.").replace(/\u00B9/g, "Rs.");
-          doc.setFillColor(gold[0],gold[1],gold[2]);
-          doc.circle(ml+2, y-1, 0.7, "F");
-          doc.setTextColor(bodyText[0],bodyText[1],bodyText[2]); doc.setFontSize(9); doc.setFont("helvetica","normal");
-          var bLines = doc.splitTextToSize(bText, cw-10);
-          bLines.forEach(function(bl2) { np(4.5); doc.text(bl2, ml+7, y); y += 4.5; });
-          y += 1;
-          return;
-        }
-
-        // REGULAR TEXT
-        var plainText = trimmed.replace(/\*\*/g, "");
-        plainText = plainText.replace(/\u20B9/g, "Rs.").replace(/\u00B9/g, "Rs.");
-        np(5);
-        doc.setTextColor(bodyText[0],bodyText[1],bodyText[2]); doc.setFontSize(9); doc.setFont("helvetica","normal");
-        var pLines = doc.splitTextToSize(plainText, cw);
-        pLines.forEach(function(pl2) { np(4.5); doc.text(pl2, ml, y); y += 4.5; });
-        y += 1;
-      });
-      y += 5;
-    }
-
-    // Divider between Q&A pairs
-    if (idx < hist.length-1 && msg.role === "assistant") {
-      np(6);
-      doc.setDrawColor(220,225,232); doc.setLineWidth(0.3);
-      doc.line(ml, y, pw-mr, y);
-      y += 6;
-    }
+  document.querySelectorAll(".bbl canvas").forEach(function(c) {
+    try {
+      chartImgs.push({data: c.toDataURL("image/png",1.0), aspect: c.width/c.height});
+    } catch(e) {}
   });
 
-  // === FOOTER ON ALL PAGES ===
+  // ═══ COVER PAGE ═══
+  doc.setFillColor(navy[0],navy[1],navy[2]);
+  doc.rect(0, 0, pw, 165, "F");
+  doc.setFillColor(gold[0],gold[1],gold[2]);
+  doc.rect(0, 165, pw, 3, "F");
+  doc.setTextColor(255,255,255); doc.setFont("helvetica","bold"); doc.setFontSize(26);
+  doc.text("Market Research & Intelligence", ml, 60);
+  doc.setFontSize(16); doc.setFont("helvetica","normal");
+  doc.text(CC + " \u2014 Real Estate Intelligence Report", ml, 75);
+  doc.setFontSize(11); doc.text(dateStr, ml, 92);
+  doc.setFillColor(gold[0],gold[1],gold[2]);
+  doc.roundedRect(pw-mr-38, 85, 38, 10, 2, 2, "F");
+  doc.setTextColor(navy[0],navy[1],navy[2]); doc.setFontSize(8); doc.setFont("helvetica","bold");
+  doc.text("CONFIDENTIAL", pw-mr-36, 91.5);
+  doc.setTextColor(bodyText[0],bodyText[1],bodyText[2]); doc.setFontSize(9); doc.setFont("helvetica","normal");
+  var queryCount = hist.filter(function(h){return h.role==="user"}).length;
+  doc.text("This report contains " + queryCount + " queries and responses generated from proprietary market research data.", ml, 182);
+
+  // ═══ CONTENT PAGES ═══
+  doc.addPage(); y = mt;
+  var chartIdx = 0;
+
+  hist.forEach(function(msg, mi) {
+    if (msg.role === "user") {
+      np(18);
+      doc.setFillColor(blue[0],blue[1],blue[2]);
+      doc.roundedRect(ml, y-4, cw, 10, 1.5, 1.5, "F");
+      doc.setTextColor(255,255,255); doc.setFontSize(8); doc.setFont("helvetica","bold");
+      doc.text("QUERY " + (Math.floor(mi/2)+1), ml+4, y+2.5);
+      var qShort = msg.content.substring(0,95) + (msg.content.length>95 ? "..." : "");
+      doc.setFont("helvetica","normal"); doc.text(qShort, ml+30, y+2.5);
+      y += 14;
+      doc.setTextColor(darkText[0],darkText[1],darkText[2]); doc.setFontSize(11); doc.setFont("helvetica","bold");
+      doc.splitTextToSize(msg.content.substring(0,300), cw).forEach(function(ql) { np(6); doc.text(ql, ml, y); y += 6; });
+      y += 4;
+      return;
+    }
+
+    // AI RESPONSE
+    np(8);
+    doc.setFillColor(gold[0],gold[1],gold[2]); doc.rect(ml, y-4, 2, 7, "F");
+    doc.setTextColor(navy[0],navy[1],navy[2]); doc.setFontSize(10); doc.setFont("helvetica","bold");
+    doc.text("ANALYSIS", ml+5, y+0.5); y += 10;
+
+    var content = (msg.content || "").replace(/<lfchart[^>]*>[\s\S]*?<\/lfchart>/g, "\n[CHART]\n");
+    var lines = content.split("\n");
+    var inTable = false, tableRows = [], tableHeaders = [];
+
+    function flushTable() {
+      if (!tableHeaders.length || !tableRows.length) { inTable=false; tableHeaders=[]; tableRows=[]; return; }
+      if (doc.autoTable) {
+        np(14 + tableRows.length * 7);
+        doc.autoTable({
+          head: [tableHeaders], body: tableRows, startY: y,
+          margin: {left: ml, right: mr}, theme: 'grid',
+          styles: {overflow:'linebreak', cellPadding:{top:2,right:3,bottom:2,left:3}, fontSize:7.5, valign:'middle', textColor:[55,55,55], lineColor:[220,225,232], lineWidth:0.2},
+          headStyles: {fillColor:headerBg, textColor:[255,255,255], fontStyle:'bold', fontSize:7.5, halign:'left'},
+          alternateRowStyles: {fillColor:altRowBg}, bodyStyles: {fillColor:[255,255,255]},
+          columnStyles: {0:{fontStyle:'bold'}},
+          didParseCell: function(data) {
+            if (data.section!=='body') return;
+            var v = String(data.cell.raw||'');
+            if (v==='GO') { data.cell.styles.textColor=[0,128,0]; data.cell.styles.fontStyle='bold'; }
+            if (v.indexOf('NO')>=0 && v.indexOf('GO')>=0) { data.cell.styles.textColor=[220,50,50]; data.cell.styles.fontStyle='bold'; }
+            if (v.indexOf('CONDITIONAL')>=0) { data.cell.styles.textColor=[200,150,0]; data.cell.styles.fontStyle='bold'; }
+            // Highlight checkmarks
+            if (v.indexOf('\u2713')>=0||v.indexOf('\u2714')>=0) data.cell.styles.textColor=[0,128,0];
+            if (v.indexOf('\u2717')>=0||v.indexOf('\u2718')>=0) data.cell.styles.textColor=[220,50,50];
+            if (v.indexOf('\u26A0')>=0) data.cell.styles.textColor=[200,150,0];
+          }
+        });
+        y = doc.lastAutoTable.finalY + 6;
+      }
+      inTable=false; tableHeaders=[]; tableRows=[];
+    }
+
+    lines.forEach(function(line) {
+      var tr = line.trim();
+      if (!tr) { y += 2; return; }
+      if (tr.indexOf("<lfchart")>=0||tr.indexOf("</lfchart")>=0||tr.indexOf("<labels>")>=0||tr.indexOf("<dataset")>=0||tr.indexOf("</dataset")>=0) return;
+
+      // CHART
+      if (tr === "[CHART]" && chartIdx < chartImgs.length) {
+        if (inTable) flushTable();
+        var ci = chartImgs[chartIdx++];
+        var maxW=cw-10, maxH=72, imgW=maxW, imgH=imgW/ci.aspect;
+        if (imgH>maxH) { imgH=maxH; imgW=imgH*ci.aspect; }
+        np(imgH+8);
+        doc.addImage(ci.data, "PNG", ml+(cw-imgW)/2, y, imgW, imgH, "chart_"+chartIdx);
+        y += imgH + 8;
+        return;
+      }
+
+      // TABLE ROW
+      if (tr.indexOf("|")===0 && tr.lastIndexOf("|")>0) {
+        if (/^\|[\s\-:|]+\|$/.test(tr)) return;
+        var cells = tr.split("|").filter(function(c){return c.trim()!=="";}).map(function(c){return c.trim().replace(/\*\*/g,"");});
+        if (!inTable) { inTable=true; tableHeaders=cells; tableRows=[]; }
+        else { tableRows.push(cells); }
+        return;
+      }
+
+      // End of table
+      if (inTable) flushTable();
+
+      // SECTION HEADER
+      if (/^#{1,4}\s/.test(tr) || (/^\*\*[^*]+\*\*$/.test(tr) && tr.length<100)) {
+        np(10);
+        var hText = tr.replace(/^#{1,4}\s*/,"").replace(/\*\*/g,"");
+        y += 3;
+        doc.setFillColor(gold[0],gold[1],gold[2]); doc.rect(ml, y-4, 1.5, 6, "F");
+        doc.setTextColor(navy[0],navy[1],navy[2]); doc.setFontSize(11); doc.setFont("helvetica","bold");
+        doc.splitTextToSize(hText, cw-6).forEach(function(hl) { np(5.5); doc.text(hl, ml+4.5, y+0.5); y+=5.5; });
+        y += 3; return;
+      }
+
+      // HR
+      if (/^---$/.test(tr)) { np(4); doc.setDrawColor(220,225,232); doc.setLineWidth(0.3); doc.line(ml,y,ml+cw,y); y+=5; return; }
+
+      // BULLET
+      if (/^[-\u2022*]\s/.test(tr)) {
+        np(5);
+        var bText = tr.replace(/^[-\u2022*]\s+/,"").replace(/\*\*/g,"");
+        doc.setFillColor(gold[0],gold[1],gold[2]); doc.circle(ml+2.5, y-1, 1, "F");
+        doc.setTextColor(bodyText[0],bodyText[1],bodyText[2]); doc.setFontSize(9); doc.setFont("helvetica","normal");
+        doc.splitTextToSize(bText, cw-10).forEach(function(bl) { np(4.2); doc.text(bl, ml+7, y); y+=4.2; });
+        y += 1.5; return;
+      }
+
+      // NUMBERED LIST
+      if (/^\d+\.\s/.test(tr)) {
+        np(5);
+        var nm = tr.match(/^(\d+)\.\s(.*)/);
+        doc.setTextColor(gold[0],gold[1],gold[2]); doc.setFontSize(9); doc.setFont("helvetica","bold");
+        doc.text(nm?nm[1]+".":"", ml+1, y);
+        doc.setTextColor(bodyText[0],bodyText[1],bodyText[2]); doc.setFontSize(9); doc.setFont("helvetica","normal");
+        doc.splitTextToSize((nm?nm[2]:tr).replace(/\*\*/g,""), cw-10).forEach(function(nl) { np(4.2); doc.text(nl, ml+8, y); y+=4.2; });
+        y += 1.5; return;
+      }
+
+      // PLAIN TEXT
+      np(4.5);
+      var pt = tr.replace(/\*\*/g,"").replace(/\u20B9/g,"Rs.");
+      doc.setTextColor(bodyText[0],bodyText[1],bodyText[2]); doc.setFontSize(9); doc.setFont("helvetica","normal");
+      doc.splitTextToSize(pt, cw).forEach(function(pl) { np(4.2); doc.text(pl, ml, y); y+=4.2; });
+      y += 1;
+    });
+
+    if (inTable) flushTable();
+    y += 4;
+  });
+
+  // ═══ HEADERS & FOOTERS ═══
   var totalPages = doc.internal.getNumberOfPages();
   for (var fi=1; fi<=totalPages; fi++) {
     doc.setPage(fi);
-    doc.setDrawColor(220,225,232); doc.setLineWidth(0.3);
-    doc.line(ml, ph-18, pw-mr, ph-18);
-    doc.setFontSize(6.5); doc.setTextColor(150,150,150); doc.setFont("helvetica","normal");
+    if (fi === 1) continue;
+    doc.setDrawColor(0,51,89); doc.setLineWidth(0.4); doc.line(ml, 22, pw-mr, 22);
+    doc.setDrawColor(220,225,232); doc.setLineWidth(0.3); doc.line(ml, ph-18, pw-mr, ph-18);
+    doc.setFontSize(7); doc.setTextColor(lightText[0],lightText[1],lightText[2]); doc.setFont("helvetica","normal");
     doc.text("Market Research & Intelligence", ml, ph-13);
     doc.text(dateStr, pw/2, ph-13, {align:"center"});
     doc.text("Page " + fi + " of " + totalPages, pw-mr, ph-13, {align:"right"});
