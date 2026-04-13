@@ -758,10 +758,21 @@ function xpdf() {
         return;
       }
 
-      // TABLE ROW
+      // TABLE ROW — detect both |col|col| and col | col | col formats
+      var pipeCount = (tr.match(/\|/g)||[]).length;
+      var isTableRow = false;
       if (tr.indexOf("|")===0 && tr.lastIndexOf("|")>0) {
-        if (/^\|[\s\-:|]+\|$/.test(tr)) return;
+        isTableRow = true; // Standard markdown: |col|col|
+      } else if (pipeCount >= 2 && !tr.match(/^http/) && tr.indexOf("](")< 0) {
+        // Loose format: col | col | col (at least 2 pipes, not a URL or markdown link)
+        isTableRow = true;
+      }
+      if (isTableRow) {
+        if (/^[\|\s\-:]+$/.test(tr)) return; // skip separator rows like |---|---| or --- | --- | ---
         var cells = tr.split("|").filter(function(c){return c.trim()!=="";}).map(function(c){return c.trim().replace(/\*\*/g,"");});
+        if (cells.length < 2) { isTableRow = false; } // Not really a table if only 1 cell
+      }
+      if (isTableRow && cells.length >= 2) {
         if (!inTable) { inTable=true; tableHeaders=cells; tableRows=[]; }
         else { tableRows.push(cells); }
         return;

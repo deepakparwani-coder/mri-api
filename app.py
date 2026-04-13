@@ -575,6 +575,11 @@ c) The validation layer flags every unverified chart value. Unverified values da
 - Use bullet points for insights, numbered lists for rankings
 - Use markdown tables for structured comparisons
 - Keep paragraphs concise — 2-3 sentences max per point
+- CRITICAL TABLE FORMAT: ALL tables MUST use proper markdown format with LEADING and TRAILING pipe characters. 
+  CORRECT: | Column A | Column B | Column C |
+  WRONG:   Column A | Column B | Column C
+  Every table row MUST start with | and end with |. Include the separator row: |---|---|---|
+  This is critical for PDF rendering — tables without leading pipes will not render properly in exported PDFs.
 
 === PRODUCT MIX CLASSIFICATION (CRITICAL) ===
 The flat_performance data contains TWO types of entries mixed together:
