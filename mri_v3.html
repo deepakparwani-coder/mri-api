@@ -1156,15 +1156,15 @@ function maskIncompleteTable(text) {
   
   for (var i = 0; i < lines.length; i++) {
     var trimmed = lines[i].trim();
-    var isTableRow = trimmed.indexOf("|") === 0 && trimmed.lastIndexOf("|") > 0;
-    var isSeparator = /^\|[\s\-:|]+\|$/.test(trimmed);
+    var pipeCount = (trimmed.match(/\|/g)||[]).length;
+    var isTableRow = pipeCount >= 2 && !trimmed.match(/^http/) && trimmed.indexOf("](")<0;
+    var isSeparator = /^[\|\s\-:]+$/.test(trimmed) && pipeCount >= 2;
     
-    if (isTableRow) {
+    if (isTableRow || isSeparator) {
       if (tableStart === -1) tableStart = i;
       if (isSeparator) hasSeparator = true;
     } else {
       if (tableStart !== -1) {
-        // Table ended — reset for next potential table
         tableStart = -1;
         hasSeparator = false;
       }
@@ -1172,26 +1172,21 @@ function maskIncompleteTable(text) {
     }
   }
   
-  // If we're still inside a table at end of text, it's incomplete
   if (tableStart !== -1) {
-    // Count body rows (after separator)
     var bodyRows = 0;
     var afterSep = false;
     for (var j = tableStart; j < lines.length; j++) {
       var t = lines[j].trim();
-      if (/^\|[\s\-:|]+\|$/.test(t)) { afterSep = true; continue; }
-      if (afterSep && t.indexOf("|") === 0) bodyRows++;
+      var pc = (t.match(/\|/g)||[]).length;
+      if (/^[\|\s\-:]+$/.test(t) && pc >= 2) { afterSep = true; continue; }
+      if (afterSep && pc >= 2) bodyRows++;
     }
     
-    // If no separator yet, or fewer than 1 body row after separator — hide the table
     if (!hasSeparator || bodyRows < 1) {
       var before = lines.slice(0, tableStart).join("\n");
       return before + "\n\n_Loading table..._";
     }
     
-    // If we have separator + some body rows but table is still streaming,
-    // show what we have but don't let md() parse a partial table.
-    // The trick: add a trailing non-table line so the regex can match what exists.
     return text + "\n\n";
   }
   
