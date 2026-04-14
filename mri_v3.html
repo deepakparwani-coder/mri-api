@@ -761,18 +761,14 @@ function xpdf() {
       // TABLE ROW — detect both |col|col| and col | col | col formats
       var pipeCount = (tr.match(/\|/g)||[]).length;
       var isTableRow = false;
-      if (tr.indexOf("|")===0 && tr.lastIndexOf("|")>0) {
-        isTableRow = true; // Standard markdown: |col|col|
-      } else if (pipeCount >= 2 && !tr.match(/^http/) && tr.indexOf("](")< 0) {
-        // Loose format: col | col | col (at least 2 pipes, not a URL or markdown link)
-        isTableRow = true;
+      var cells = [];
+      if (pipeCount >= 2 && !tr.match(/^http/) && tr.indexOf("](")<0 && tr.indexOf("[Web")<0) {
+        // Skip separator rows
+        if (/^[\|\s\-:]+$/.test(tr)) return;
+        cells = tr.split("|").filter(function(c){return c.trim()!=="";}).map(function(c){return c.trim().replace(/\*\*/g,"").replace(/\u20B9/g,"Rs.");});
+        if (cells.length >= 2) isTableRow = true;
       }
       if (isTableRow) {
-        if (/^[\|\s\-:]+$/.test(tr)) return; // skip separator rows like |---|---| or --- | --- | ---
-        var cells = tr.split("|").filter(function(c){return c.trim()!=="";}).map(function(c){return c.trim().replace(/\*\*/g,"");});
-        if (cells.length < 2) { isTableRow = false; } // Not really a table if only 1 cell
-      }
-      if (isTableRow && cells.length >= 2) {
         if (!inTable) { inTable=true; tableHeaders=cells; tableRows=[]; }
         else { tableRows.push(cells); }
         return;
@@ -1226,6 +1222,8 @@ function md(text){
   r=r.replace(/`([^`]+)`/g,"<code>$1</code>");
   r=r.replace(/^---$/gm,"<hr>");
   r=r.replace(/\|(.+)\|\n\|[-|: ]+\|\n((?:\|.+\|\n?)+)/g,function(_,h,rows){var ths=h.split("|").filter(Boolean).map(function(x){return"<th>"+x.trim()+"</th>";}).join("");var trs=rows.trim().split("\n").map(function(rr){return"<tr>"+rr.split("|").filter(Boolean).map(function(cc){return"<td>"+cc.trim()+"</td>";}).join("")+"</tr>";}).join("");return"<table><thead><tr>"+ths+"</tr></thead><tbody>"+trs+"</tbody></table>";});
+  // Also catch loose tables: Col | Col | Col (without leading pipe)
+  r=r.replace(/^([^|<\n][^\n]*\|[^\n]*\|[^\n]*)\n[-| :]+\n((?:[^\n]*\|[^\n]*\|[^\n]*\n?)+)/gm,function(_,h,rows){var ths=h.split("|").filter(Boolean).map(function(x){return"<th>"+x.trim()+"</th>";}).join("");var trs=rows.trim().split("\n").map(function(rr){if(/^[-| :]+$/.test(rr))return"";return"<tr>"+rr.split("|").filter(Boolean).map(function(cc){return"<td>"+cc.trim()+"</td>";}).join("")+"</tr>";}).filter(Boolean).join("");return"<table><thead><tr>"+ths+"</tr></thead><tbody>"+trs+"</tbody></table>";});
   r=r.replace(/^(\d+)\. (.+)$/gm,'<li style="list-style:decimal;margin-left:16px;margin-bottom:3px">$2</li>');
   r=r.replace(/^[*\-•] (.+)$/gm,'<li style="list-style:disc;margin-left:16px;margin-bottom:3px">$1</li>');
   r=r.replace(/((?:<li[^>]*>.*?<\/li>\n?)+)/g,function(m){return"<ul style='padding-left:8px;margin:6px 0'>"+m+"</ul>";});
