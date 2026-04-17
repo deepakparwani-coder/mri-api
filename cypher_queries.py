@@ -376,7 +376,8 @@ QUERIES = {
     """,
 
     "micromarket_detail": """
-        MATCH (m:MicroMarket {name: $location, city: $city})-[:HAS_PROJECT]->(p:Project)
+        MATCH (m:MicroMarket)-[:HAS_PROJECT]->(p:Project)
+        WHERE m.city_name = $city AND toLower(m.name) CONTAINS toLower($location)
         OPTIONAL MATCH (p)-[:DEVELOPED_BY]->(b:Builder)
         RETURN p.name AS project, b.name AS builder,
                p.total_supply_units AS total_supply,
@@ -507,5 +508,52 @@ QUERIES = {
         WITH m, count(p) AS projects, sum(p.annual_sales_units) AS sales
         RETURN m.name AS micromarket, projects, sales
         ORDER BY sales DESC
+    """,
+
+    # ═══════════════════════════════════════
+    # PRICE RANGE ANALYSIS (new for Gurugram)
+    # ═══════════════════════════════════════
+
+    "price_range_carpet": """
+        MATCH (c:City {name: $city})-[r:PRICE_BAND_PERFORMANCE]->(pb:PriceBand {basis: 'carpet'})
+        RETURN pb.name AS price_range,
+               r.annual_sales_units AS annual_sales,
+               r.unsold_units AS unsold,
+               r.total_supply_units AS total_supply,
+               r.wt_avg_carpet_price_psf AS carpet_psf,
+               r.monthly_sales_velocity_pct AS velocity,
+               r.product_efficiency_pct AS efficiency,
+               r.annual_months_inventory AS months_inv
+        ORDER BY pb.name
+    """,
+
+    "price_range_saleable": """
+        MATCH (c:City {name: $city})-[r:PRICE_BAND_PERFORMANCE]->(pb:PriceBand {basis: 'saleable'})
+        RETURN pb.name AS price_range,
+               r.annual_sales_units AS annual_sales,
+               r.unsold_units AS unsold,
+               r.total_supply_units AS total_supply,
+               r.wt_avg_saleable_price_psf AS saleable_psf,
+               r.monthly_sales_velocity_pct AS velocity,
+               r.product_efficiency_pct AS efficiency,
+               r.annual_months_inventory AS months_inv
+        ORDER BY pb.name
+    """,
+
+    # ═══════════════════════════════════════
+    # RERA STATUS (new for Gurugram — data didn't exist in old Gurgaon)
+    # ═══════════════════════════════════════
+
+    "projects_by_rera_status": """
+        MATCH (c:City {name: $city})-[:HAS_MICROMARKET]->(:MicroMarket)-[:HAS_PROJECT]->(p:Project)
+        OPTIONAL MATCH (p)-[:DEVELOPED_BY]->(b:Builder)
+        RETURN p.name AS project,
+               b.name AS builder,
+               p.location AS location,
+               p.rera_registered AS rera_number,
+               p.rera_status AS rera_status,
+               p.total_supply_units AS total_supply,
+               p.sold_pct AS sold_pct
+        ORDER BY p.rera_status, p.annual_sales_units DESC
     """,
 }

@@ -141,7 +141,7 @@ WEB_KEYWORDS = re.compile(
 # CORRIDOR → SECTOR MAPPING
 # ═══════════════════════════════════════
 CORRIDOR_MAP = {
-    # ── GURGAON CORRIDORS ──
+    # ── GURUGRAM CORRIDORS ──
     r'dwarka|dxp|dwarka.express': [
         'Sector 37D', 'Sector - 99', 'Sector 102', 'Sector 103',
         'Sector - 104', 'Sector 108', 'Sector 109', 'Sector - 110',
@@ -164,7 +164,7 @@ CORRIDOR_MAP = {
         'Sector 71', 'Sector 72', 'Sector 76', 'Sector 77',
         'Sector 78', 'Sector 79', 'Sector - 79 B'
     ],
-    r'new.gurgaon': [
+    r'new.gurgaon|new.gurugram': [
         'Sector 76', 'Sector 79', 'Sector 80', 'Sector - 81',
         'Sector 82', 'Sector 83', 'Sector 84', 'Sector 85',
         'Sector 86', 'Sector 88A', 'Sector 88B', 'Sector 89',
@@ -540,7 +540,7 @@ Users often query by corridor names, not sector numbers. Map these to constituen
 - Golf Course Road / GCR = Sectors 42, 43, 53, 54, 55, 56, 57, 65
 - Golf Course Extension Road = Sectors 58, 59, 61, 62, 63, 63A, 65, 66
 - Southern Peripheral Road (SPR) = Sectors 68, 69, 70, 70A, 71, 72, 76, 77, 78, 79, 79B
-- New Gurgaon = Sectors 76, 79, 80, 81, 82, 83, 84, 85, 86, 88A, 88B, 89, 89A, 90, 91, 92, 93, 95
+- New Gurugram = Sectors 76, 79, 80, 81, 82, 83, 84, 85, 86, 88A, 88B, 89, 89A, 90, 91, 92, 93, 95
 
 When a user asks about a corridor:
 1. Identify ALL sectors that map to it from the data
@@ -726,7 +726,7 @@ C. LAND COST SENSITIVITY MATRIX (instead of guessing):
    | 250 | 17.8 | [calc] | [calc] | [calc] | [calc] | GO/NO-GO |
    | 300 | 21.4 | [calc] | [calc] | [calc] | [calc] | GO/NO-GO |
 
-   Use construction cost of Rs. 4,000 PSF for Pune, Rs. 4,500 for Gurgaon, Rs. 3,500 for Kolkata as DEFAULT but state the assumption clearly.
+   Use construction cost of Rs. 4,000 PSF for Pune, Rs. 4,500 for Gurugram, Rs. 3,500 for Kolkata as DEFAULT but state the assumption clearly.
    
    Then say: "To refine this analysis with your actual numbers, please share:
    1. Land cost (total Rs. Crores or per-acre rate)
@@ -743,7 +743,7 @@ D. COST STRUCTURE — USER INPUTS FIRST:
    | Cost Component | User Provided? | Default Assumption | Notes |
    |---|---|---|---|
    | Land Cost | MUST ASK if not provided | Show sensitivity matrix | Most critical input |
-   | Construction Cost PSF | Use if provided | Rs.4,000 Pune, Rs.4,500 Gurgaon, Rs.3,500 Kolkata | Varies by developer — Godrej/Lodha: Rs.5,500+, Local: Rs.3,500 |
+   | Construction Cost PSF | Use if provided | Rs.4,000 Pune, Rs.4,500 Gurugram, Rs.3,500 Kolkata | Varies by developer — Godrej/Lodha: Rs.5,500+, Local: Rs.3,500 |
    | Premium FSI / TDR Cost | Use if provided | Exclude if not mentioned | Maharashtra: typically 50% of ready reckoner rate |
    | Approvals & Statutory % | Use if provided | 10% of construction | Varies by state — MH higher than HR |
    | Brokerage / Channel Partner % | Use if provided | DO NOT ASSUME — show as separate line item at 0% | Ranges 0% (direct sales) to 4% (heavy channel dependence) |
@@ -881,7 +881,7 @@ K. ABSORPTION SCENARIO MODELING (3 scenarios):
 ALWAYS run the Development Mix Optimizer when ANY of these conditions exist:
 - FSI > 2.5 (UDCPR residential cap is typically 2.5-3.0 — excess FSI MUST go to non-residential)
 - User mentions "commercial" in DCR/parking norms
-- Plot is in IT corridor (Hinjewadi, Whitefield, Gurgaon Cyber City, etc.)
+- Plot is in IT corridor (Hinjewadi, Whitefield, Gurugram Cyber City, etc.)
 - Plot area > 5 acres (large plots almost always need mixed-use for optimal returns)
 - User explicitly asks about mixed-use or commercial potential
 
@@ -1058,10 +1058,10 @@ CRITICAL RULES FOR WEB INTELLIGENCE:
 3. CLEARLY SEPARATE sources:
    - For LF data insights: state them normally (this is the default)
    - For web-sourced context: prefix with [Web Context] and cite the source
-   - Example: '[Web Context] RBI cut the repo rate by 25bps to 6.0% in April 2025 (Source: RBI.org.in). Based on LF data, Gurgaon velocity is already at 4.76% — this rate cut could accelerate absorption further.'
+   - Example: '[Web Context] RBI cut the repo rate by 25bps to 6.0% in April 2025 (Source: RBI.org.in). Based on LF data, Gurugram velocity is already at 4.76% — this rate cut could accelerate absorption further.'
 4. In the source citation footer, add a separate WEB SOURCES section listing each web source used with its URL.
 5. Use web search for: current repo rate, recent infrastructure news for the city, any policy changes affecting real estate, developer earnings if asked, recent land deals.
-6. Do NOT use web search to find property data that contradicts or supplements LF data. If web says Gurgaon avg price is Rs.25,000 PSF but LF data says Rs.20,981 — use LF data and note the difference if relevant.
+6. Do NOT use web search to find property data that contradicts or supplements LF data. If web says Gurugram avg price is Rs.25,000 PSF but LF data says Rs.20,981 — use LF data and note the difference if relevant.
 7. For FEASIBILITY queries, use up to 8 web searches covering: location surroundings, infrastructure projects, UDCPR/DCR rules, zoning, MahaRERA, metro/highway status, commercial rates if needed. For non-feasibility queries, limit to 3 searches.
 
 REGULATORY PORTAL REFERENCE (for Maharashtra feasibility):
@@ -1095,7 +1095,7 @@ def handle_query():
 
     body = request.json
     user_query = body.get('query', '')
-    city = body.get('city', 'Gurgaon')
+    city = body.get('city', 'Gurugram')
     history = body.get('history', [])
     stream = body.get('stream', True)
 
@@ -1218,7 +1218,7 @@ def validate_number():
     """Validate a specific data point — returns source lineage."""
     body = request.json
     project = body.get('project', '')
-    city = body.get('city', 'Gurgaon')
+    city = body.get('city', 'Gurugram')
 
     result = run_query("validate_number", project_name=project, city=city)
     return jsonify(result)

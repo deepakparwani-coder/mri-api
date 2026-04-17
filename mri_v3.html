@@ -340,7 +340,7 @@ var CC = null;
 var HI = {};
 
 CI["Kolkata"] = {kb: KB, mm: KB_MM, n: 57, label: "Kolkata Residential"};
-CI["Gurgaon"] = {kb: GGN_KB, mm: GGN_MM, n: 27, label: "Gurgaon / Gurugram Residential"};
+CI["Gurugram"] = {kb: GGN_KB, mm: GGN_MM, n: 27, label: "Gurugram Residential"};
 CI["Hinjewadi"] = {kb: HJ_KB, mm: HJ_MM, n: 123, label: "Hinjewadi, Pune Residential"};
 try { var _c = localStorage.getItem("mri_c"); if (_c) { var _p = JSON.parse(_c); for (var k in _p) CI[k] = _p[k]; } } catch(e) {}
 try { var _h = localStorage.getItem("mri_h"); if (_h) HI = JSON.parse(_h); } catch(e) {}
@@ -1959,7 +1959,7 @@ function initMap() {
   // City centers
   var centers = {
     "Kolkata": [22.5726, 88.3639],
-    "Gurgaon": [28.4595, 77.0266],
+    "Gurugram": [28.4595, 77.0266],
     "Mumbai": [19.0760, 72.8777],
     "Pune": [18.5204, 73.8567],
     "Hinjewadi": [18.5912, 73.7380],
