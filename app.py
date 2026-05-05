@@ -332,7 +332,7 @@ def needs_web(query):
     # Always enable web for feasibility/site queries — they need location context
     if re.search(r'feasib|plot.*area|acre|fsi|dcr|google.*map|goo\.gl|maps\.google|site.*intel|due.dilig|land.*acqui', q, re.IGNORECASE):
         return True
-    return bool(WEB_KEYWORDS.search(q))
+   return needs_web_search(needs_web_search(q))
 
 
 # ═══════════════════════════════════════
