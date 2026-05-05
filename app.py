@@ -126,16 +126,120 @@ def run_query(query_name, **params):
 # ═══════════════════════════════════════
 # WEB INTELLIGENCE DETECTION
 # ═══════════════════════════════════════
-WEB_KEYWORDS = re.compile(
-    r'repo.rate|rbi|interest.rate|infra|metro|express|highway|airport|policy|'
-    r'stamp.duty|rera|government|budget|gdp|inflation|macro|economic|news|recent|'
-    r'current.market|trend.2026|trend.2025|regulation|nirmala|fm |union.budget|'
-    r'pmay|pradhan|rate.cut|rate.hike|what.if|impact.of|how.will|forecast|predict|'
-    r'outlook|developer.*earn|earnings.call|land.deal|acquisition.*land|'
-    r'rental.yield|rental|rent.trend|connectivity|dwarka|appreciation|capital.gain|'
-    r'corridor|upcoming|under.construction|completion|timeline',
-    re.IGNORECASE
-)
+WEB_KEYWORDS = {
+
+    # Monetary policy — RBI rate decisions, lending rates, EMI impact
+    "MONETARY_POLICY": [
+        "repo rate", "reverse repo", "rbi", "reserve bank",
+        "interest rate", "rate cut", "rate hike", "rate revision",
+        "monetary policy", "mpc", "monetary policy committee",
+        "lending rate", "home loan rate", "housing loan rate",
+        "emi", "mclr", "base rate", "pll", "prime lending rate",
+        "cash reserve ratio", "crr", "slr", "statutory liquidity",
+        "policy rate", "bank rate",
+    ],
+
+    # Physical infrastructure — transit, roads, civic projects
+    "INFRASTRUCTURE": [
+        "metro", "metro line", "metro phase", "metro station",
+        "expressway", "highway", "national highway", "nh-",
+        "airport", "international airport", "greenfield airport",
+        "flyover", "bridge", "ring road", "outer ring road", "orr",
+        "elevated corridor", "underpass", "rrts", "namo bharat",
+        "monorail", "bullet train", "high speed rail", "hsr",
+        "logistics park", "industrial corridor", "smart city",
+        "sez", "special economic zone", "it park", "tech park",
+        "data center", "freight corridor", "port", "rapid rail",
+        "underground", "skywalk", "infra project", "infrastructure project",
+    ],
+
+    # Regulatory & policy — RERA, stamp duty, zoning, housing schemes
+    "REGULATORY_POLICY": [
+        "stamp duty", "rera", "registration charges", "registration fee",
+        "circle rate", "ready reckoner", "guidance value",
+        "tdr", "transferable development rights",
+        "fsi", "far", "floor area ratio", "floor space index",
+        "premium fsi", "building bye-laws", "master plan",
+        "development plan", "land use", "zoning", "land conversion",
+        "amrut", "pmay", "pradhan mantri awas yojana",
+        "affordable housing scheme", "credit linked subsidy", "clss",
+        "gst on real estate", "gst", "gst rate", "gst council",
+        "input tax credit", "itc",
+        "model tenancy act", "benami", "nbcc", "land pooling",
+        "redevelopment policy", "cluster redevelopment",
+    ],
+
+    # Macroeconomic — GDP, inflation, fiscal, capital markets
+    "MACROECONOMIC": [
+        "gdp", "inflation", "cpi", "wpi", "iip", "pmi",
+        "current account", "fiscal deficit", "budget",
+        "union budget", "state budget", "tax", "income tax",
+        "ltcg", "stcg", "capital gains", "section 54", "section 80c",
+        "fdi", "foreign direct investment", "private equity", "pe fund",
+        "reit", "real estate investment trust",
+        "insolvency", "ibc", "nclat", "credit rating",
+        "rating downgrade", "sovereign rating",
+    ],
+
+    # Market intelligence — earnings, deals, broker/consultancy reports
+    "MARKET_INTELLIGENCE": [
+        "developer earnings", "earnings call", "quarterly results",
+        "annual report", "land deal", "land deals", "land acquisition",
+        "joint venture", "jda", "joint development agreement",
+        "merger", "acquisition", "ipo", "qip", "rights issue",
+        "preferential allotment", "anarock", "knight frank", "jll",
+        "cbre", "colliers", "propequity", "cushman", "wakefield",
+        "credai", "naredco", "industry report", "consultancy report",
+        "broker report", "research report", "savills", "vestian",
+    ],
+
+    # Macro framing — language indicating user wants context, not raw data
+    "MACRO_FRAMING": [
+        "outlook", "forecast", "projection", "macro",
+        "how will", "impact of", "effect of", "influence of",
+        "due to", "because of", "amid", "considering", "given that",
+        "in light of", "implication", "consequence",
+        "what does it mean for", "going forward", "next year",
+    ],
+
+    # Rental & yield — separate category because it's commercial-leaning data
+    "RENTAL_YIELD": [
+        "rental yield", "rental return", "rental income",
+        "lease rate", "leasing", "leased", "tenant",
+        "rent vs buy", "rental market", "rental demand",
+    ],
+}
+
+
+# Pre-compile per-category patterns (word-boundary anchored to reduce false matches)
+WEB_KEYWORD_PATTERNS = {
+    category: re.compile(
+        r'\b(?:' + '|'.join(re.escape(k) for k in keywords) + r')\b',
+        re.IGNORECASE,
+    )
+    for category, keywords in WEB_KEYWORDS.items()
+}
+
+
+def classify_web_intent(query: str) -> list:
+    """Return list of categories whose keywords appear in the query.
+
+    Empty list = no web search needed; the LF graph alone should answer.
+    Multiple categories may fire (e.g. 'how will RBI rate cut affect Sector 71'
+    fires MONETARY_POLICY + MACRO_FRAMING).
+    """
+    if not query:
+        return []
+    return [
+        category
+        for category, pattern in WEB_KEYWORD_PATTERNS.items()
+        if pattern.search(query)
+    ]
+
+
+def needs_web_search(query: str) -> bool:
+    """Backward-compatible boolean check for code that doesn't need categories."""
+    return bool(classify_web_intent(query))
 
 # ═══════════════════════════════════════
 # CORRIDOR → SECTOR MAPPING
