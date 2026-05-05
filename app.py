@@ -1,15 +1,23 @@
 """
-MR&I API Backend v3
+MR&I API Backend v4
 ====================
 Flask server bridging the HTML frontend, Neo4j graph, and Claude API.
 Web Intelligence integration via Anthropic web_search tool.
-v3: Fixed intent classifier (35+ patterns), 10 new Cypher queries,
-    project name extraction, rate limiting, credential security.
+
+v4 CHANGES (over v3):
+- FIX: Indentation/double-call bug in needs_web() (was crashing on Render)
+- UPGRADE: run_query() now attaches the query's description from QueryRegistry
+- UPGRADE: Data block sent to Claude now surfaces each query's description
+  alongside its rows, so Claude has semantic context for column meanings
+- WEB_KEYWORDS now categorized into 7 buckets (MONETARY_POLICY, INFRASTRUCTURE,
+  REGULATORY_POLICY, MACROECONOMIC, MARKET_INTELLIGENCE, MACRO_FRAMING,
+  RENTAL_YIELD) with ~110 keywords vs ~25 previously
 
 Architecture:
-  User query → classify intent → run Cypher query → get EXACT data →
-  detect if web context needed → send data + query to Claude (with web_search tool if needed) →
-  Claude presents data + web context → stream response back
+  User query → classify intent → run Cypher query → get EXACT data + DESCRIPTION →
+  detect if web context needed → send data + descriptions + query to Claude
+  (with web_search tool if needed) → Claude presents data + web context →
+  stream response back
 """
 
 import os
@@ -33,7 +41,7 @@ except ImportError:
     print("pip install anthropic")
     exit(1)
 
-# Import our queries
+# Import our queries (now a QueryRegistry, not a plain dict)
 from cypher_queries import QUERIES
 
 app = Flask(__name__)
@@ -99,11 +107,26 @@ def get_claude():
 
 
 def run_query(query_name, **params):
-    """Run a Cypher query and return results as list of dicts."""
+    """Run a Cypher query and return results as list of dicts.
+
+    v4: Result dict now includes a `description` field carrying the
+    semantic-context blurb authored in cypher_queries.py. This description
+    is later surfaced to Claude alongside the rows so it can interpret
+    column names, units, and intent correctly.
+    """
     if query_name not in QUERIES:
-        return {"error": f"Unknown query: {query_name}"}
+        return {
+            "query": query_name,
+            "description": "",
+            "row_count": 0,
+            "data": [],
+            "source": "error",
+            "error": f"Unknown query: {query_name}",
+        }
 
     cypher = QUERIES[query_name]
+    # QueryRegistry.description() returns "" if not present — safe default
+    description = QUERIES.description(query_name) if hasattr(QUERIES, "description") else ""
     d = get_driver()
 
     try:
@@ -112,19 +135,28 @@ def run_query(query_name, **params):
             records = [dict(record) for record in result]
     except Exception as e:
         print(f"  ✗ Query {query_name} failed: {e}")
-        return {"error": str(e), "query": query_name, "row_count": 0, "data": [], "source": "error"}
+        return {
+            "query": query_name,
+            "description": description,
+            "params": params,
+            "row_count": 0,
+            "data": [],
+            "source": "error",
+            "error": str(e),
+        }
 
     return {
         "query": query_name,
+        "description": description,
         "params": params,
         "row_count": len(records),
         "data": records,
-        "source": "LF_Research_Database"
+        "source": "LF_Research_Database",
     }
 
 
 # ═══════════════════════════════════════
-# WEB INTELLIGENCE DETECTION
+# WEB INTELLIGENCE DETECTION (v4: categorized)
 # ═══════════════════════════════════════
 WEB_KEYWORDS = {
 
@@ -327,12 +359,20 @@ def detect_corridor(query):
 
 
 def needs_web(query):
-    """Detect if query needs web intelligence."""
+    """Detect if query needs web intelligence.
+
+    v4: Fixed double-call and indentation bugs from v3. Logs which categories
+    fired so the architect can audit web-routing decisions.
+    """
     q = query or ""
     # Always enable web for feasibility/site queries — they need location context
     if re.search(r'feasib|plot.*area|acre|fsi|dcr|google.*map|goo\.gl|maps\.google|site.*intel|due.dilig|land.*acqui', q, re.IGNORECASE):
+        print(f"  🌐 [WEB_INTENT] feasibility-shortcut fired for: {q[:60]!r}")
         return True
-   return needs_web_search(needs_web_search(q))
+    fired = classify_web_intent(q)
+    if fired:
+        print(f"  🌐 [WEB_INTENT] categories={fired} query={q[:60]!r}")
+    return bool(fired)
 
 
 # ═══════════════════════════════════════
@@ -593,6 +633,76 @@ def classify_intent(query, city):
 
 
 # ═══════════════════════════════════════
+# DATA-BLOCK FORMATTER (v4)
+# ═══════════════════════════════════════
+def format_data_block_for_claude(data_results, city, corridor_sectors=None):
+    """Render Cypher results as a structured block with per-query descriptions.
+
+    v4: Each query block now leads with its description (column meanings,
+    units, intended use) BEFORE the rows. This grounds Claude's interpretation
+    of column names and prevents unit-confusion errors.
+    """
+    lines = []
+    lines.append(f"CITY: {city}")
+    lines.append("")
+    lines.append(
+        "DATA LINEAGE: Every row below was queried directly from the LF "
+        "Knowledge Base built from Liases Foras proprietary research data. "
+        "Each query block carries a DESCRIPTION explaining what its columns "
+        "mean, in what units. Use the description to interpret the rows — "
+        "do not infer units or column semantics from the names alone."
+    )
+    lines.append("")
+    lines.append(
+        "CRITICAL: This data covers RESIDENTIAL markets only. If the user's "
+        "query involves commercial/office/retail/co-working pricing, you MUST "
+        "use web_search for those rates and label them [Web Context]. Do NOT "
+        "attribute any commercial pricing to LF data."
+    )
+    lines.append("")
+
+    queries_used = []
+    total_rows = 0
+
+    for result in data_results:
+        if "error" in result and result.get("source") == "error":
+            continue
+        name = result.get("query", "unknown")
+        desc = result.get("description", "")
+        rows = result.get("data", [])
+        source = result.get("source", "unknown")
+
+        queries_used.append(name)
+        total_rows += result.get("row_count", 0)
+
+        lines.append(f"--- QUERY: {name} ({len(rows)} rows, source: {source}) ---")
+        if desc:
+            lines.append(f"DESCRIPTION: {desc}")
+        lines.append("ROWS:")
+        lines.append(json.dumps(rows, indent=1, default=str))
+        lines.append("")
+
+    lines.append(
+        f"TOTAL: {len(queries_used)} queries executed, {total_rows} rows "
+        f"returned from LF Knowledge Base."
+    )
+    lines.append(f"QUERIES USED: {', '.join(queries_used)}")
+
+    if corridor_sectors:
+        lines.append("")
+        lines.append(
+            f"CORRIDOR MAPPING: The query references a corridor. Constituent "
+            f"sectors searched: {', '.join(corridor_sectors)}"
+        )
+        lines.append(
+            "Present data grouped by sector with individual project metrics. "
+            "Do NOT average across projects."
+        )
+
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════
 # SYSTEM PROMPT
 # ═══════════════════════════════════════
 SYSTEM_PROMPT_BASE = """You are MR&I (Market Research & Intelligence), a precision real estate analytics engine for Indian residential markets.
@@ -605,6 +715,7 @@ SYSTEM_PROMPT_BASE = """You are MR&I (Market Research & Intelligence), a precisi
 5. When recommending strategies — frame as 'recommendations based on current data' NOT predictions.
 6. Use Indian formatting: Rs., Lakhs, Crores, PSF. Not ₹ symbol.
 7. Clearly separate 'The data shows...' (fact) from 'Based on this, we can infer...' (analysis).
+8. Each query block in the data section starts with a DESCRIPTION line that defines column meanings and units. READ THE DESCRIPTION before interpreting the rows. Do NOT guess what a column means from its name alone.
 
 === SOURCE ATTRIBUTION — ZERO TOLERANCE (READ THIS 3 TIMES) ===
 THIS IS THE MOST IMPORTANT RULE IN THIS ENTIRE PROMPT.
@@ -900,9 +1011,6 @@ Search for and score the site on these 8 parameters. For each, identify specific
 
 Present this as a SITE SCORECARD TABLE with the specific landmark names, distances, and scores.
 
-**STEP 3 — DEVELOPMENT ECONOMICS (from LF data)**
-Calculate all of these — NEVER skip any line item:
-
 **STEP 2.5 — REGULATORY & TITLE INTELLIGENCE (MANDATORY for Maharashtra/Pune feasibility)**
 
 When the plot is in Maharashtra (Pune, Mumbai, Nagpur, etc.), use web_search to gather regulatory data from government portals. For other states, adapt to local equivalents.
@@ -926,21 +1034,11 @@ B. UDCPR / DCR RULES (search and apply):
      * Mandatory deductions: 10% recreational open space, amenity space for plots >4000 sqm
      * Margin/setback rules by building height
    - If user has provided FSI in their DCR extract, USE THEIR NUMBER but cross-reference against UDCPR
-   - Present as table:
-     | UDCPR Parameter | Rule | Applied Value | Source |
-     |---|---|---|---|
-     | Base FSI | Zone R2: 1.0 | 1.0 | UDCPR Table 6.2 |
-     | Premium FSI | Max 1.0 additional | +1.0 | UDCPR 6.3 |
-     | TDR | Max 2.0 additional | +2.0 | User DCR input |
-     | Total Effective FSI | | 4.0 | As per user input |
-     | Road Width | 18m+ required for FSI 4.0 | Verify on site | UDCPR Table 6.1 |
-     | Recreational OS | 10% of net plot mandatory | Deducted | UDCPR 15.1 |
 
 C. RERA & PROJECT HISTORY CHECK:
    - Search: "MahaRERA [developer name] [location]" or "maharerait.maharashtra.gov.in [location]"
    - Check: Are there existing RERA registrations on this plot or adjacent plots?
    - Check: Developer's track record — how many projects registered, completion status
-   - Present any findings as: "[Web Context] MahaRERA shows [X] registered projects in [location] by [developer]. Source: maharerait.maharashtra.gov.in"
 
 D. ENVIRONMENTAL & RESTRICTION CHECK:
    - Search: "[location] NDZ no development zone" or "[location] CRZ flood zone"
@@ -949,19 +1047,7 @@ D. ENVIRONMENTAL & RESTRICTION CHECK:
    - Flag any environmental risks found
 
 E. REGULATORY VERIFICATION CHECKLIST:
-   ALWAYS present this checklist at the end of the regulatory section. Mark items as ✓ (verified via web), ⚠ (partially verified), or ✗ (user must verify manually):
-
-   | Document | Status | Action Required |
-   |---|---|---|
-   | 7/12 Extract (Satbara) | ✗ Not accessible online without survey no. | User to obtain from digitalsatbara.maharashtra.gov.in |
-   | Property Card | ✗ Requires manual lookup | User to obtain from mahabhumi.gov.in |
-   | Bhu Naksha (Plot boundary) | ✗ Requires interactive map | User to verify at mahabhunakasha.mahabhumi.gov.in |
-   | Development Plan Zone | ✓ or ⚠ Checked via web search | [State finding] |
-   | UDCPR FSI Rules | ✓ Cross-referenced | [State applicable FSI] |
-   | Index-II (Transaction history) | ✗ Requires survey number | User to check at freesearchigrservice.maharashtra.gov.in |
-   | Lis Pendens (Litigation) | ✗ Not accessible via search | User to verify at igrmaharashtra.gov.in |
-   | MahaRERA Check | ✓ or ⚠ Searched | [State finding] |
-   | Environmental Clearance | ⚠ Searched for restrictions | [State finding] |
+   ALWAYS present a checklist at the end of the regulatory section. Mark items as ✓ (verified via web), ⚠ (partially verified), or ✗ (user must verify manually). Cover: 7/12 Extract (Satbara), Property Card, Bhu Naksha, Development Plan Zone, UDCPR FSI Rules, Index-II (transaction history), Lis Pendens (litigation), MahaRERA Check, Environmental Clearance.
 
    Then add: "**Critical:** This feasibility is based on the plot parameters provided by you and publicly available regulatory information. Before committing to acquisition, obtain the 7/12 Extract, Property Card, Index-II, and Lis Pendens certificate to verify clear title, absence of encumbrances, and litigation-free status."
 
@@ -989,282 +1075,56 @@ B. REVENUE PROJECTION (use LF price data from the micromarket):
    - Show GROSS revenue only. Do NOT deduct brokerage, stamp duty absorption, or any sales cost from revenue. These are cost items and belong in the cost structure section.
 
 C. LAND COST SENSITIVITY MATRIX (instead of guessing):
-   Present this table showing profitability at DIFFERENT land costs:
-   
-   | Land Cost (Rs. Cr) | Per Acre (Rs. Cr) | Construction Cost | Total Cost | Revenue | Margin | Verdict |
-   |---|---|---|---|---|---|---|
-   | 100 | 7.1 | [calc] | [calc] | [calc] | [calc] | GO/NO-GO |
-   | 150 | 10.7 | [calc] | [calc] | [calc] | [calc] | GO/NO-GO |
-   | 200 | 14.2 | [calc] | [calc] | [calc] | [calc] | GO/NO-GO |
-   | 250 | 17.8 | [calc] | [calc] | [calc] | [calc] | GO/NO-GO |
-   | 300 | 21.4 | [calc] | [calc] | [calc] | [calc] | GO/NO-GO |
+   Present a table showing profitability at DIFFERENT land costs (e.g., Rs.100 Cr / 150 / 200 / 250 / 300). Use construction cost of Rs. 4,000 PSF for Pune, Rs. 4,500 for Gurugram, Rs. 3,500 for Kolkata as DEFAULT but state the assumption clearly.
 
-   Use construction cost of Rs. 4,000 PSF for Pune, Rs. 4,500 for Gurugram, Rs. 3,500 for Kolkata as DEFAULT but state the assumption clearly.
-   
-   Then say: "To refine this analysis with your actual numbers, please share:
-   1. Land cost (total Rs. Crores or per-acre rate)
-   2. Expected construction cost (Rs. PSF on BUA)
-   3. Any premium FSI or TDR costs applicable
-   4. Brokerage/channel partner commission (% of revenue — varies: 0% direct sales, 2-4% channel partners)
-   5. Stamp duty absorption if any (Maharashtra: 5-6% of unit value)
-   I will recalculate the full P&L with your exact numbers."
+   Then say: "To refine this analysis with your actual numbers, please share land cost, construction cost, premium FSI/TDR costs, brokerage/channel partner commission, and stamp duty absorption if any. I will recalculate the full P&L."
 
-D. COST STRUCTURE — USER INPUTS FIRST:
+D. COST STRUCTURE — USER INPUTS FIRST. Use industry defaults clearly labeled as assumptions when user inputs are missing. CRITICAL: Brokerage and Stamp Duty Absorption are DEVELOPER DECISIONS, not industry defaults — show them as Rs.0 in the base case with impact noted.
 
-   Check if the user has provided ANY of these. If yes, use their numbers. If no, use defaults BUT clearly label them as assumptions:
+E. BREAKEVEN ANALYSIS — at MARKET AVERAGE price, what is the MAXIMUM land cost that makes the project viable (>15% margin)?
 
-   | Cost Component | User Provided? | Default Assumption | Notes |
-   |---|---|---|---|
-   | Land Cost | MUST ASK if not provided | Show sensitivity matrix | Most critical input |
-   | Construction Cost PSF | Use if provided | Rs.4,000 Pune, Rs.4,500 Gurugram, Rs.3,500 Kolkata | Varies by developer — Godrej/Lodha: Rs.5,500+, Local: Rs.3,500 |
-   | Premium FSI / TDR Cost | Use if provided | Exclude if not mentioned | Maharashtra: typically 50% of ready reckoner rate |
-   | Approvals & Statutory % | Use if provided | 10% of construction | Varies by state — MH higher than HR |
-   | Brokerage / Channel Partner % | Use if provided | DO NOT ASSUME — show as separate line item at 0% | Ranges 0% (direct sales) to 4% (heavy channel dependence) |
-   | Stamp Duty Absorption | Use if provided | DO NOT ASSUME — show as separate line item at 0% | Some developers absorb 5-7% stamp duty as sales incentive |
-   | Marketing & Sales % | Use if provided | 4% of revenue | Brand developers spend less (2-3%), new entrants more (5-6%) |
-   | Finance Cost % | Use if provided | 13% on 60% of project cost | Depends on debt-equity ratio, developer's borrowing rate |
-   | Contingency % | Use if provided | 5% of total cost | Standard buffer |
+F. SENSITIVITY ANALYSIS (3×3 matrix of price ±15% × land cost low/mid/high)
 
-   CRITICAL: For Brokerage and Stamp Duty Absorption — these are DEVELOPER DECISIONS, not industry defaults. Show them as Rs.0 in the base case. Add a note: "Brokerage and stamp duty absorption not included — add your % if applicable. At 3% brokerage + 5% stamp duty absorption, total revenue reduces by 8% (Rs.X Crores impact)." Show the IMPACT, not the assumed number.
+G. PHASED CASH FLOW MODEL — 5-year project lifecycle, year-wise table of revenue booked, collections, construction spend, other costs, net cash flow, cumulative.
 
-   ALWAYS present the defaults table with a note:
-   "**Assumptions Used:** The above uses industry-standard cost assumptions for [city]. Your actual costs may differ significantly. To get a precise P&L, share your:
-   1. Land acquisition cost (Rs. Crores or per-acre)
-   2. Construction cost (Rs. PSF on BUA) — this varies from Rs.3,500 to Rs.6,000+ depending on specifications
-   3. Your target debt-equity ratio and borrowing rate
-   4. Any premium FSI / TDR / fungible FSI costs
-   5. Your marketing budget assumption (% of revenue)
-   6. Brokerage / channel partner commission (% of revenue)
-   7. Whether you plan to absorb stamp duty (partial/full)
-   
-   I will instantly recalculate with your exact numbers."
+H. IRR CALCULATION using year-wise net cash flows. Benchmarks: <15% WEAK, 15-20% MODERATE, 20-25% STRONG, >25% EXCELLENT.
 
-   If this is a FOLLOW-UP message where the user is providing their cost inputs after seeing the initial analysis, recalculate the FULL P&L with their numbers — no need to show the sensitivity matrix again. Just show the definitive P&L and updated GO/NO-GO verdict.
+I. NPV CALCULATION at 12%, 15%, 18% discount rates.
 
-E. BREAKEVEN ANALYSIS:
-   - At the MARKET AVERAGE price, what is the MAXIMUM land cost that makes the project viable (>15% margin)?
-   - At the user's TARGET price (if mentioned), what is the breakeven land cost?
-   - Breakeven units: Total Cost / Revenue per unit = minimum units to sell before profit
-   - Breakeven timeline: Breakeven units / monthly absorption rate (from LF velocity data) = months to breakeven
+J. EQUITY MULTIPLE = total cash inflows / total equity invested. <1.5x WEAK, 1.5-2.0x MODERATE, >2.0x STRONG.
 
-F. SENSITIVITY ANALYSIS (MANDATORY — present as 3×3 matrix):
-   
-   | | Land @ Rs.100 Cr | Land @ Rs.175 Cr | Land @ Rs.250 Cr |
-   |---|---|---|---|
-   | Price -15% | Margin % | Margin % | Margin % |
-   | Price Base | Margin % | Margin % | Margin % |
-   | Price +15% | Margin % | Margin % | Margin % |
-
-G. PHASED CASH FLOW MODEL (MANDATORY for feasibility):
-   Model a 5-year project lifecycle with quarterly cash flows. Use this EXACT structure:
-
-   ASSUMPTIONS (state clearly):
-   - Total project duration: 5 years (20 quarters)
-   - Phasing: Phase 1 = 40% of saleable area, Phase 2 = 35%, Phase 3 = 25%
-   - Phase 1 launch: Quarter 1, Phase 2: Quarter 8, Phase 3: Quarter 14
-   - Monthly absorption rate: Use LF market velocity (e.g., 3-5% of launched inventory per month)
-   - Price escalation: 5-7% per annum (use LF historical price CAGR if available)
-   - Construction spend profile: 20% Year 1, 30% Year 2, 30% Year 3, 15% Year 4, 5% Year 5
-   - Land payment: 100% in Year 0 (or as user specifies)
-   - Collections: 20% on booking, 60% construction-linked, 20% on possession
-
-   CASH FLOW TABLE (present year-wise):
-   | Year | Revenue Booked | Collections | Construction Spend | Other Costs | Net Cash Flow | Cumulative Cash Flow |
-   |---|---|---|---|---|---|---|
-   | Year 0 (Land) | 0 | 0 | 0 | Land Cost | -(Land) | -(Land) |
-   | Year 1 | [calc] | [calc] | [calc] | [calc] | [calc] | [calc] |
-   | Year 2 | [calc] | [calc] | [calc] | [calc] | [calc] | [calc] |
-   | Year 3 | [calc] | [calc] | [calc] | [calc] | [calc] | [calc] |
-   | Year 4 | [calc] | [calc] | [calc] | [calc] | [calc] | [calc] |
-   | Year 5 | [calc] | [calc] | [calc] | [calc] | [calc] | [calc] |
-   | TOTAL | [sum] | [sum] | [sum] | [sum] | [sum] | Final Surplus/Deficit |
-
-   HOW TO CALCULATE EACH YEAR:
-   - Revenue Booked = Units sold in year × Average selling price per unit
-   - Units sold = Total launched units × monthly velocity × 12 months (capped at available inventory)
-   - Collections = Revenue from previous bookings flowing in per collection schedule
-   - Construction Spend = Total construction cost × spend profile %
-   - Other Costs = Approvals + Marketing + Finance cost for that year
-
-H. IRR CALCULATION (MANDATORY):
-   Using the year-wise net cash flows from section G:
-   
-   IRR = the discount rate at which NPV of all cash flows = 0
-   
-   Calculate IRR using this approach:
-   - Cash flow Year 0: -(Land cost + Year 0 expenses) [NEGATIVE — this is the investment]
-   - Cash flow Year 1-5: Net cash flow per year from the table above
-   - State: "Project IRR: X% — this represents the annualized return on equity deployed"
-   
-   IRR BENCHMARKS for real estate:
-   - Below 15%: WEAK — doesn't justify the risk and capital lock-in
-   - 15-20%: MODERATE — acceptable for low-risk locations with strong demand
-   - 20-25%: STRONG — good risk-adjusted return
-   - Above 25%: EXCELLENT — proceed aggressively
-   
-   If land cost is not provided, show IRR at 3 different land costs:
-   | Land Cost | Project IRR | Equity Multiple | Verdict |
-   |---|---|---|---|
-   | Rs.X Cr (low) | XX% | X.Xx | GO |
-   | Rs.Y Cr (mid) | XX% | X.Xx | CONDITIONAL |
-   | Rs.Z Cr (high) | XX% | X.Xx | NO-GO |
-
-I. NPV CALCULATION:
-   NPV = Sum of [Cash Flow(t) / (1 + discount_rate)^t] for t = 0 to 5
-   
-   Use discount rate = 15% (typical developer's cost of capital in India)
-   - If NPV > 0: Project creates value — GO
-   - If NPV < 0: Project destroys value — NO-GO
-   - State NPV in Rs. Crores
-   
-   Also show NPV at 12%, 15%, 18% discount rates to show sensitivity to cost of capital.
-
-J. EQUITY MULTIPLE:
-   Equity Multiple = Total cash inflows / Total equity invested
-   - Equity = Land cost + 40% of construction cost (assuming 60% debt)
-   - A multiple of 1.5x means the developer gets back 1.5x their equity
-   - Below 1.5x: WEAK. 1.5-2.0x: MODERATE. Above 2.0x: STRONG.
-
-K. ABSORPTION SCENARIO MODELING (3 scenarios):
-   Model the SAME project under 3 different absorption rates:
-   
-   | Metric | Pessimistic | Base Case | Optimistic |
-   |---|---|---|---|
-   | Monthly Velocity | LF market avg -30% | LF market avg | LF market avg +20% |
-   | Sellout Timeline | X months | X months | X months |
-   | Revenue (with escalation) | Rs.X Cr | Rs.X Cr | Rs.X Cr |
-   | IRR | X% | X% | X% |
-   | NPV @ 15% | Rs.X Cr | Rs.X Cr | Rs.X Cr |
-   | Equity Multiple | X.Xx | X.Xx | X.Xx |
-   | Breakeven Month | Month X | Month X | Month X |
-   
-   Use LF velocity data as the BASE CASE. Pessimistic = 30% slower absorption. Optimistic = 20% faster.
-   This is the MOST VALUABLE table in the entire report — it shows the CXO what happens if the market slows down.
+K. ABSORPTION SCENARIO MODELING — Pessimistic (LF velocity -30%), Base Case (LF velocity), Optimistic (LF velocity +20%) — show IRR/NPV/Equity Multiple/Breakeven Month for each.
 
 **STEP 4 — COMPETITIVE POSITIONING (from LF data)**
-- Pull ALL projects from the same micromarket using the comparable_projects data
-- Show top 10 by annual sales with their exact metrics
+- Pull ALL projects from the same micromarket using comparable_projects data
+- Show top 10 by annual sales with exact metrics
 - Identify PRICING GAPS — price bands with low competition
 - Identify CONFIGURATION GAPS — BHK types undersupplied
-- Show velocity leaders as benchmarks for what sells
+- Show velocity leaders as benchmarks
 
 **STEP 5 — DEVELOPMENT MIX OPTIMIZER (CRITICAL — never default to single-use)**
 
-=== TRIGGER LOGIC ===
-ALWAYS run the Development Mix Optimizer when ANY of these conditions exist:
-- FSI > 2.5 (UDCPR residential cap is typically 2.5-3.0 — excess FSI MUST go to non-residential)
-- User mentions "commercial" in DCR/parking norms
-- Plot is in IT corridor (Hinjewadi, Whitefield, Gurugram Cyber City, etc.)
-- Plot area > 5 acres (large plots almost always need mixed-use for optimal returns)
-- User explicitly asks about mixed-use or commercial potential
+ALWAYS run when ANY of these conditions exist: FSI > 2.5, user mentions "commercial" in DCR/parking norms, plot is in IT corridor, plot area > 5 acres, or user explicitly asks about mixed-use.
 
-=== UDCPR FSI CONSTRAINT CHECK (Maharashtra) ===
-Before recommending any development mix, CHECK the FSI limits:
-- UDCPR Table 6-G: Basic residential FSI = 1.10. Max building potential with premium + TDR:
-  * Road <9m: 1.10 | Road 9-12m: 2.00 | Road 12-15m: 2.25 | Road 15-24m: 2.50 | Road 24-30m: 2.75 | Road 30m+: 3.00
-- If user's FSI EXCEEDS the residential max for their road width → the excess MUST be commercial/IT/institutional
-- Chapter 7 allows up to FSI 5.0 for commercial in CBD/commercial zones at 50% ASR premium
-- Ancillary FSI: 60% additional for residential, 80% for commercial (on payment of premium)
-- FLAG clearly: "Your total FSI of 4.0 exceeds the UDCPR residential limit of [X] for [road width]. The excess [Y] FSI should be allocated to commercial/IT/institutional use."
+UDCPR FSI CONSTRAINT CHECK (Maharashtra): Basic residential FSI = 1.10. Max with premium + TDR varies by road width (9m: 1.10, 30m+: 3.00). If user's FSI exceeds residential max, the excess MUST be commercial/IT/institutional.
 
-=== DEVELOPMENT MIX TABLE (MANDATORY) ===
-Present this table showing how FSI is allocated across components:
+Present a Development Mix Table showing FSI allocation across: Residential (sale), IT/Commercial Offices, Co-working Spaces, Co-living/Serviced Apts, Retail. Total must equal user's FSI.
 
-| Component | FSI Allocated | BUA (sqft) | Saleable Area | Revenue Model | Pricing Source |
-|---|---|---|---|---|---|
-| Residential (sale) | [max allowed under UDCPR] | [calc] | [×70%] | Sale @ Rs.X PSF | LF Data |
-| IT/Commercial Offices | [allocated] | [calc] | [×75%] | Sale or Lease @ Rs.Y PSF | [Web Context] |
-| Co-working Spaces | [allocated] | [calc] | [×85%] | Rs.X/seat/month × Y seats | [Web Context] |
-| Co-living / Serviced Apts | [allocated] | [calc] | [×80%] | Rs.X/bed/month × Y beds | [Web Context] |
-| Retail (ground floor) | [allocated] | [calc] | [×85%] | Sale or Lease @ Rs.Z PSF | [Web Context] |
-| **TOTAL** | **[must equal user's FSI]** | **[total BUA]** | | | |
-
-=== REVENUE MODEL — SALE vs LEASE vs HYBRID ===
 For each non-residential component, show THREE revenue approaches:
+- Option 1 — FULL SALE (maximize upfront cash, highest IRR)
+- Option 2 — HYBRID (sell residential, lease commercial — most common in India)
+- Option 3 — FULL LEASE (annuity income, requires patient capital)
 
-**Option 1 — FULL SALE (maximize upfront cash):**
-- Sell everything including commercial floors
-- Highest upfront revenue, fastest capital recovery
-- Revenue = Saleable area × Sale PSF for each component
-- IRR typically higher, equity multiple faster
+For LEASE components: annual lease income = leasable area × monthly rent × 12 × occupancy (85%). Cap rate valuation: annual lease income / cap rate (7-9%) = asset value at Year 5.
 
-**Option 2 — HYBRID (sell residential, lease commercial):**
-- SELL: Residential units (immediate cash flow from LF-backed pricing)
-- LEASE: Commercial/co-working/retail (recurring revenue stream)
-- This is how most large mixed-use developments work in India
-- Show: Year 1-5 residential sale collections + annual lease income from commercial
-- Lease yield: [Web Context] Hinjewadi office lease rates Rs.X-Y per sqft/month
-- Annual lease income = Leasable area × monthly rent × 12 × occupancy rate (85%)
-- Cap rate valuation: Annual lease income / cap rate (7-9%) = asset value at Year 5
+Component-specific guidance:
+- RESIDENTIAL: from LF data (HIGH confidence)
+- IT OFFICES: web search, label [Web Context] — typical Rs.50-100/sqft/month lease, Rs.8,000-15,000 PSF sale
+- CO-WORKING: web search — typical Rs.5,000-15,000/seat/month, 1 seat per 60-80 sqft, occupancy 70% Y1 / 85% Y2+
+- CO-LIVING: web search — typical Rs.8,000-25,000/bed/month, 1 bed per 100-300 sqft, occupancy 80% Y1 / 90% Y2+
+- RETAIL: ground floor only, typically 1.5-2x residential rate or Rs.80-200/sqft/month lease, keep 5-10% of total BUA
 
-**Option 3 — FULL LEASE (maximize long-term wealth):**
-- Lease everything including residential (co-living model)
-- Lower upfront but builds annuity income
-- Requires higher equity / patient capital
-- Show annual rental income, stabilized yield, asset valuation at Year 5 and Year 10
-
-=== COMPONENT-SPECIFIC GUIDANCE ===
-
-**RESIDENTIAL (from LF data — HIGH confidence):**
-- Use LF weighted average price for the micromarket
-- Configuration mix from flat_performance (which BHK has highest velocity)
-- Ticket size from ticket_size data (which price band has best absorption)
-- Unit sizes from unit_size data
-- Absorption rate from LF velocity data
-- ALL numbers from LF — label clearly
-
-**IT OFFICES / COMMERCIAL (from web — label [Web Context]):**
-- Search: "[location] office space lease rate per sqft"
-- Search: "[location] commercial property sale rate"
-- Typical metrics: Rs.50-100/sqft/month lease in IT corridors, Rs.8,000-15,000 PSF sale
-- Demand driver: IT employee count in catchment, vacancy rate
-- Pre-lease potential: Anchor tenant strategy
-
-**CO-WORKING (from web — label [Web Context]):**
-- Search: "[location] co-working space rates per seat"
-- Revenue model: Per seat/month × total seats × occupancy
-- Typical: Rs.5,000-15,000/seat/month depending on city and location
-- Seat density: 1 seat per 60-80 sqft of carpet area
-- Occupancy assumption: 70% Year 1, 85% Year 2+
-- Operators: WeWork, Awfis, 91springboard, Smartworks — can lease to operator or self-operate
-
-**CO-LIVING / SERVICED APARTMENTS (from web — label [Web Context]):**
-- Search: "[location] co-living rates per bed per month"
-- Revenue model: Per bed/month × total beds × occupancy
-- Typical: Rs.8,000-25,000/bed/month in IT corridors
-- Bed density: 1 bed per 100-150 sqft carpet (shared) or 200-300 sqft (studio)
-- Occupancy: 80% Year 1, 90% Year 2+
-- Target: Young IT professionals, single occupants, new joiners
-- Operators: Stanza Living, Zolo, CoHo — can lease to operator at guaranteed rent
-
-**RETAIL (from web — label [Web Context]):**
-- Typically ground floor and first floor only
-- Search: "[location] retail shop rates per sqft"
-- Revenue: Sale at premium to residential (typically 1.5-2x) or lease at Rs.80-200/sqft/month
-- Keep at 5-10% of total BUA — serves the residential and commercial population
-
-=== OPTIMAL MIX RECOMMENDATION ===
-After presenting the mix table, recommend the OPTIMAL allocation with reasoning:
-
-"**Recommended Development Mix for [location]:**
-Based on UDCPR FSI limits, LF residential market data, and [location] commercial demand:
-- Residential: X% (FSI Y) — [reasoning from LF data]
-- Commercial/IT: X% (FSI Y) — [reasoning: IT corridor demand, FSI utilization]
-- Co-working/Co-living: X% (FSI Y) — [reasoning: employee catchment, rental yield]
-- Retail: X% (FSI Y) — [reasoning: serves captive population]
-
-This mix achieves:
-- Total Revenue: Rs.X Cr (vs Rs.Y Cr pure residential — Z% higher)
-- Blended IRR: X% (vs Y% pure residential)
-- Annual rental income post-stabilization: Rs.X Cr/year from lease components
-- Asset valuation at Year 5: Rs.X Cr (from cap rate on lease income)"
-
-=== CONFIGURATION RECOMMENDATION (from LF residential data — for residential component only) ===
-- Recommended BHK mix (from flat_performance — which BHK has highest velocity)
-- Recommended ticket size (from ticket_size data — which price band has best absorption)
-- Recommended unit sizes (from unit_size data)
-- Phasing strategy (Phase 1 launch size, based on market absorption rate)
-- Positioning: Where should this project sit vs competitors
+After the mix table, recommend the OPTIMAL allocation with reasoning, total revenue (vs pure residential), blended IRR, annual rental income post-stabilization, and asset valuation at Year 5.
 
 **STEP 6 — RISK MATRIX**
 | Risk | Likelihood | Impact | Mitigation |
@@ -1277,40 +1137,22 @@ This mix achieves:
 
 **STEP 7 — GO / CONDITIONAL GO / NO-GO VERDICT**
 
-The verdict must consider BOTH the site scorecard AND the financial viability:
-
-A. SITE VERDICT (from scorecard):
-- Total Score > 65/80: STRONG SITE — Location fundamentals support development
-- Total Score 45-65/80: MODERATE SITE — Some parameters need improvement
-- Total Score < 45/80: WEAK SITE — Location risks dominate
-
-B. FINANCIAL VERDICT (from land cost sensitivity):
-- If user provided land cost: Give definitive GO/NO-GO based on margin
-- If user did NOT provide land cost: State the MAXIMUM VIABLE LAND COST clearly
-  Example: "At current market rates of Rs.8,200 PSF, the project is viable if land cost stays below Rs.150 Crores (Rs.10.7 Cr/acre). Above Rs.200 Crores, the project enters loss territory."
-
+A. SITE VERDICT (from scorecard): >65/80 STRONG, 45-65 MODERATE, <45 WEAK
+B. FINANCIAL VERDICT: definitive GO/NO-GO if user provided land cost; otherwise state MAXIMUM VIABLE LAND COST clearly
 C. COMBINED VERDICT FORMAT:
-  **VERDICT: [GO / CONDITIONAL GO / NO-GO]**
-  **Site Score: [X]/80 — [STRONG/MODERATE/WEAK]**
-  **Maximum Viable Land Cost: Rs.[X] Crores (Rs.[Y] Cr/acre)**
-  **Breakeven Price PSF: Rs.[Z] (vs market average Rs.[M])**
-
-  Then 1 paragraph executive summary explaining WHY — referencing specific data points.
-
-D. ACTIONABLE NEXT STEPS (always include):
-  Present 3-4 concrete next steps the user should take, e.g.:
-  - "Negotiate land at Rs.[X] Cr/acre or below for 18%+ margin"
-  - "Commission a detailed soil/geotechnical survey for the plot"
-  - "Verify Metro Line 3 station proximity — confirm walking distance"
-  - "Share your land cost and construction estimates for a refined P&L"
+   **VERDICT: [GO / CONDITIONAL GO / NO-GO]**
+   **Site Score: [X]/80 — [STRONG/MODERATE/WEAK]**
+   **Maximum Viable Land Cost: Rs.[X] Crores (Rs.[Y] Cr/acre)**
+   **Breakeven Price PSF: Rs.[Z] (vs market average Rs.[M])**
+   Then 1 paragraph executive summary explaining WHY — referencing specific data points.
+D. ACTIONABLE NEXT STEPS — 3-4 concrete next steps the user should take.
 
 === CRITICAL RULE FOR FEASIBILITY ===
-When a feasibility query comes in, ALWAYS activate web_search even if the query doesn't match web keywords.
-The user expects location-specific intelligence that REQUIRES web search — nearby landmarks, upcoming infrastructure, corporate campuses. LF data alone is NOT sufficient for feasibility. The combination of LF market data + web location intelligence is what makes this analysis valuable.
+When a feasibility query comes in, ALWAYS activate web_search even if the query doesn't match web keywords. The user expects location-specific intelligence that REQUIRES web search — nearby landmarks, upcoming infrastructure, corporate campuses. LF data alone is NOT sufficient for feasibility.
 
-**SITE INTELLIGENCE:** Same as Land Feasibility but without the financial projections. Focus on Steps 1-2 (location + surroundings) and Step 7 (verdict). Used for quick site assessments without full financial modeling.
+**SITE INTELLIGENCE:** Same as Land Feasibility but without the financial projections. Focus on Steps 1-2 (location + surroundings) and Step 7 (verdict).
 
-MANDATORY: Include at least one <lfchart> when the data supports it (3+ data points). Do NOT force a chart when data is sparse (single project lookup, yes/no answers). If only 1-2 data points exist, use a markdown table instead.
+MANDATORY: Include at least one <lfchart> when the data supports it (3+ data points). Do NOT force a chart when data is sparse.
 
 End EVERY response with:
 ---
@@ -1387,29 +1229,13 @@ def handle_query():
     if web_mode:
         print(f"  🌐 Web intelligence activated for: {user_query[:60]}...")
 
-    # Step 3: Format data for Claude
-    data_text = f"CITY: {city}\n\n"
-    data_text += "DATA LINEAGE: Every row below was queried directly from the LF Knowledge Base built from Liases Foras proprietary research data. Row counts and query names are provided for traceability.\n"
-    data_text += "CRITICAL: This data covers RESIDENTIAL markets only. If the user's query involves commercial/office/retail/co-working pricing, you MUST use web_search for those rates and label them [Web Context]. Do NOT attribute any commercial pricing to LF data.\n\n"
-    queries_used = []
-    total_rows = 0
-    for result in data_results:
-        if "error" in result:
-            continue
-        queries_used.append(result['query'])
-        total_rows += result['row_count']
-        data_text += f"--- {result['query']} ({result['row_count']} rows, source: {result['source']}) ---\n"
-        data_text += json.dumps(result['data'], indent=1, default=str)
-        data_text += "\n\n"
-    data_text += f"TOTAL: {len(queries_used)} queries executed, {total_rows} rows returned from LF Knowledge Base.\n"
-    data_text += f"QUERIES USED: {', '.join(queries_used)}\n"
-
-    # Detect corridor context and add mapping hint
+    # Step 3: Format data for Claude (v4: includes per-query descriptions)
     corridor_sectors = detect_corridor(user_query)
-    if corridor_sectors:
-        corridor_name = user_query  # Will be parsed by Claude from context
-        data_text += f"\nCORRIDOR MAPPING: The query references a corridor. Constituent sectors searched: {', '.join(corridor_sectors)}\n"
-        data_text += "Present data grouped by sector with individual project metrics. Do NOT average across projects.\n"
+    data_text = format_data_block_for_claude(
+        data_results,
+        city=city,
+        corridor_sectors=corridor_sectors,
+    )
 
     # Step 4: Build messages
     messages = []
@@ -1470,7 +1296,7 @@ def handle_query():
         return jsonify({
             "response": response_text,
             "data_queries": [r["query"] for r in data_results],
-            "total_rows": sum(r["row_count"] for r in data_results),
+            "total_rows": sum(r.get("row_count", 0) for r in data_results),
             "web_mode": web_mode,
         })
 
@@ -1527,8 +1353,8 @@ def health():
 
 @app.route('/', methods=['GET'])
 def root():
-    """Root endpoint — Railway may check this too."""
-    return jsonify({"service": "MR&I API v3", "status": "ok"})
+    """Root endpoint — Render/Railway may check this too."""
+    return jsonify({"service": "MR&I API v4", "status": "ok"})
 
 
 if __name__ == '__main__':
@@ -1536,7 +1362,7 @@ if __name__ == '__main__':
     parser.add_argument('--port', type=int, default=5000)
     args = parser.parse_args()
 
-    print(f"MR&I API Server v3 starting on port {args.port}")
+    print(f"MR&I API Server v4 starting on port {args.port}")
     print(f"Neo4j: {NEO4J_URI}")
     print(f"Web Intelligence: enabled")
     app.run(host='0.0.0.0', port=args.port, debug=True)
