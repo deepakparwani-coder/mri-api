@@ -533,13 +533,27 @@ def classify_intent(query, city):
     if re.search(r'inventory.*trend|months.*inventory.*over|unsold.*trend', q):
         results.append(run_query("inventory_trend", city=city))
 
-    # ── Buyer demographics ──
-    if re.search(r'buyer|demograph|who.*buy|customer|profile|age.*group|gender|pincode|locality|surname|religion', q):
+   # ── Buyer demographics ──
+    # Note: Buyer queries are city-specific (currently Hinjewadi only). On other
+    # cities they return [ZERO ROWS], which Claude handles per Rule E (no fabrication).
+    if re.search(
+        r'buyer|demograph|psychograph|who.*buy|customer|profile|age.*group|'
+        r'gender|pincode|locality|district|surname|religion|language|mother.*tongue|'
+        r'state.*wise|category.*buyer|buyer.*category|huf|individual.*buyer|'
+        r'corporate.*buyer|investor.*type|origin|catchment',
+        q,
+    ):
+        # Existing 6 dimensions
         results.append(run_query("buyer_age_dist", city=city))
         results.append(run_query("buyer_gender_dist", city=city))
         results.append(run_query("buyer_locality_dist", city=city))
         results.append(run_query("buyer_state_dist", city=city))
         results.append(run_query("buyer_religion_dist", city=city))
+        results.append(run_query("buyer_language_dist", city=city))
+        # NEW 3 dimensions
+        results.append(run_query("buyer_district_dist", city=city))
+        results.append(run_query("buyer_pincode_dist", city=city))
+        results.append(run_query("buyer_category_dist", city=city))
 
     # ── Slow-moving ──
     if re.search(r'slow.*mov|slow.*sell|aging|stuck|not.*sell', q):
@@ -627,9 +641,15 @@ def classify_intent(query, city):
     if re.search(r'micro.*market|sub.*region|area.*within|region.*within|localities|zones|which.*areas', q):
         results.append(run_query("micromarket_list", city=city))
 
-    # ═══ Cap at 5 queries to prevent timeout ═══
-    if len(results) > 5:
-        results = results[:5]
+  # ═══ Cap to prevent timeout — raised to 9 for buyer demographics
+#     # (the buyer block adds 9 queries; cap at 5 would silently drop most of them) ═══
+#     if len(results) > 9:
+#         results = results[:9]
+#
+# Important: when 9 buyer queries fire AND the user also triggers another block
+# (e.g. they ask "demographics + market overview"), some queries may still be
+# truncated. Watch the [WEB_INTENT] logs in Render for a few queries after deploy
+# to see if 9 is sufficient. We can raise further if needed.
 
     # ═══ Default: market overview ═══
     if not results:
