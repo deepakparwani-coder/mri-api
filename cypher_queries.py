@@ -826,6 +826,85 @@ QUERY_DEFINITIONS = {
             ORDER BY bs.count DESC
         """,
     },
+  "buyer_district_dist": {
+        "description": (
+            "Top 30 buyer source-DISTRICTS (where buyers came FROM, by their "
+            "registration address — district granularity, broader than locality "
+            "but finer than state). Per row: district, buyers (count). Useful "
+            "for catchment analysis at a granularity that aligns with "
+            "Indian administrative units. Hinjewadi only as of v2.6."
+        ),
+        "cypher": """
+            MATCH (c:City {name: $city})-[:BUYER_PROFILE]->(bs:BuyerSegment)
+            WHERE bs.dimension = 'district'
+            RETURN bs.value AS district, bs.count AS buyers
+            ORDER BY bs.count DESC
+            LIMIT 30
+        """,
+    },
+
+    "buyer_pincode_dist": {
+        "description": (
+            "Top 30 buyer source-PINCODES (6-digit postal codes from buyers' "
+            "registration addresses). Per row: pincode (string), buyers "
+            "(count). The most granular catchment view available — useful for "
+            "hyperlocal demand mapping. Pincodes are STORED AS STRINGS so "
+            "leading zeros are preserved. Hinjewadi only as of v2.6."
+        ),
+        "cypher": """
+            MATCH (c:City {name: $city})-[:BUYER_PROFILE]->(bs:BuyerSegment)
+            WHERE bs.dimension = 'pincode'
+            RETURN bs.value AS pincode, bs.count AS buyers
+            ORDER BY bs.count DESC
+            LIMIT 30
+        """,
+    },
+
+    "buyer_category_dist": {
+        "description": (
+            "Buyer TYPE distribution (legal entity classification from IGR "
+            "registration). Per row: buyer_type, buyers (count). Typical "
+            "values: 'Individual', 'Body Of Individuals', 'Association Of "
+            "Person', 'Artificial Juridical Person', 'HUF', 'Trust', "
+            "'Company'. Use to distinguish end-user demand from corporate / "
+            "investor demand. Hinjewadi only as of v2.6."
+        ),
+        "cypher": """
+            MATCH (c:City {name: $city})-[:BUYER_PROFILE]->(bs:BuyerSegment)
+            WHERE bs.dimension = 'category'
+            RETURN bs.value AS buyer_type, bs.count AS buyers
+            ORDER BY bs.count DESC
+        """,
+    },
+
+# =============================================================================
+# OPTIONAL: 4th new query for the IgrProjectDetails transactions
+# =============================================================================
+# Only useful if you ran load_igr_transactions() during the load. Skip if
+# you didn't, since IgrProjectDetails is currently a 10-row sample.
+
+    "igr_transaction_sample": {
+        "description": (
+            "Sample of registered property transactions from IGR sub-registrar "
+            "data. Per row: sro (sub-registrar office), doc_number (registration "
+            "doc ID), village (Marathi village name from the registry), area_sqm "
+            "(carpet area in sq.m), area_sqft, value_rs (agreement value in Rs), "
+            "project_hint (heuristically extracted project name from the Marathi "
+            "property description — e.g. 'Life Republic', 'Godrej Park World'). "
+            "Returns up to 50 most-recent (by doc_number desc) transactions. "
+            "Hinjewadi only as of v2.6."
+        ),
+        "cypher": """
+            MATCH (c:City {name: $city})-[:HAS_TRANSACTION]->(t:Transaction)
+            RETURN t.sro AS sro, t.doc_number AS doc_number,
+                   t.village AS village, t.area_sqm AS area_sqm,
+                   t.area_sqft AS area_sqft, t.value_rs AS value_rs,
+                   t.project_hint AS project_hint
+            ORDER BY t.doc_number DESC
+            LIMIT 50
+        """,
+    },
+
 
     # ═══════════════════════════════════════
     # YoY ANALYSIS
