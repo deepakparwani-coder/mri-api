@@ -1,23 +1,30 @@
 """
-MR&I API Backend v4
-====================
+MR&I API Backend v4.1
+======================
 Flask server bridging the HTML frontend, Neo4j graph, and Claude API.
 Web Intelligence integration via Anthropic web_search tool.
 
-v4 CHANGES (over v3):
-- FIX: Indentation/double-call bug in needs_web() (was crashing on Render)
-- UPGRADE: run_query() now attaches the query's description from QueryRegistry
-- UPGRADE: Data block sent to Claude now surfaces each query's description
-  alongside its rows, so Claude has semantic context for column meanings
-- WEB_KEYWORDS now categorized into 7 buckets (MONETARY_POLICY, INFRASTRUCTURE,
-  REGULATORY_POLICY, MACROECONOMIC, MARKET_INTELLIGENCE, MACRO_FRAMING,
-  RENTAL_YIELD) with ~110 keywords vs ~25 previously
+v4.1 CHANGES (over v4):
+- FIX A: format_data_block_for_claude() now emits [ZERO ROWS] markers and a
+  COVERAGE GAPS footer when queries return 0 rows. Prevents Claude from
+  papering over data gaps with web-search fabrications.
+- FIX A: System prompt adds Rule E (anti-fabrication on zero rows) and
+  Rule F (trust prior data-backed answers on follow-ups).
+- FIX C: Every web_search tool call is logged with [WEB_SEARCH_AUDIT] —
+  user query, classified categories, and the actual search string Claude
+  sent to Google. Visible in Render Logs tab.
+
+v4 CHANGES (preserved):
+- needs_web() indentation/double-call bug fixed
+- run_query() carries description from QueryRegistry
+- WEB_KEYWORDS now categorized (MONETARY_POLICY, INFRASTRUCTURE, etc.)
+- Description-aware data block sent to Claude
 
 Architecture:
   User query → classify intent → run Cypher query → get EXACT data + DESCRIPTION →
   detect if web context needed → send data + descriptions + query to Claude
   (with web_search tool if needed) → Claude presents data + web context →
-  stream response back
+  stream response back (with web_search audit logging)
 """
 
 import os
@@ -662,6 +669,7 @@ def format_data_block_for_claude(data_results, city, corridor_sectors=None):
     lines.append("")
 
     queries_used = []
+    zero_row_queries = []
     total_rows = 0
 
     for result in data_results:
@@ -671,11 +679,18 @@ def format_data_block_for_claude(data_results, city, corridor_sectors=None):
         desc = result.get("description", "")
         rows = result.get("data", [])
         source = result.get("source", "unknown")
+        row_count = result.get("row_count", 0)
 
         queries_used.append(name)
-        total_rows += result.get("row_count", 0)
+        total_rows += row_count
+        if row_count == 0:
+            zero_row_queries.append(name)
 
-        lines.append(f"--- QUERY: {name} ({len(rows)} rows, source: {source}) ---")
+        # Make zero-row results VISUALLY UNMISSABLE — Claude tends to skim
+        # past empty [] arrays. The [ZERO ROWS] tag is the explicit signal
+        # that this is a coverage gap, not data to interpret.
+        zero_marker = "  [ZERO ROWS — coverage gap for this city]" if row_count == 0 else ""
+        lines.append(f"--- QUERY: {name} ({row_count} rows, source: {source}){zero_marker} ---")
         if desc:
             lines.append(f"DESCRIPTION: {desc}")
         lines.append("ROWS:")
@@ -687,6 +702,24 @@ def format_data_block_for_claude(data_results, city, corridor_sectors=None):
         f"returned from LF Knowledge Base."
     )
     lines.append(f"QUERIES USED: {', '.join(queries_used)}")
+
+    # CRITICAL: consolidated zero-row summary so Claude cannot miss it.
+    # This is the anti-fabrication anchor — see Rule E in system prompt.
+    if zero_row_queries:
+        lines.append("")
+        lines.append(
+            f"COVERAGE GAPS: {len(zero_row_queries)} of {len(queries_used)} "
+            f"queries returned ZERO rows for this city: "
+            f"{', '.join(zero_row_queries)}"
+        )
+        lines.append(
+            "RULE E (BINDING): For these zero-row queries, the LF Knowledge "
+            "Base has NO COVERAGE for this city — say so explicitly. Do NOT "
+            "fill the gap by web-searching the topic and presenting the web "
+            "result as analysis. Web search is for context (rates, policy, "
+            "news) — NEVER for synthesizing missing LF data into structured "
+            "demographic/profile/segment claims."
+        )
 
     if corridor_sectors:
         lines.append("")
@@ -747,6 +780,36 @@ RULE D — WHEN DATA IS INSUFFICIENT:
 If the user asks about a segment (commercial, retail, industrial) that LF doesn't cover, say:
 "LF Knowledge Base covers the residential market for this location. For residential benchmarking, the data shows [exact LF numbers]. For commercial/retail pricing, here is web intelligence: [Web Context] [source URL]."
 This is honest, useful, and doesn't fabricate. The user will respect this far more than a fabricated number.
+
+RULE E — ZERO-ROW QUERIES ARE COVERAGE GAPS, NOT INVITATIONS TO FABRICATE:
+The data block you receive may include queries marked [ZERO ROWS — coverage gap for this city] and a "COVERAGE GAPS:" footer listing them. When you see this:
+
+1. State the gap honestly: "The LF Knowledge Base does not currently have [demographic profiles / buyer data / sector-wise breakdowns / etc.] loaded for [city]."
+2. Offer the closest LF data you DO have — pricing, velocity, supply, sales — to partially address the question.
+3. Do NOT web-search the topic and present the web result as a structured analysis. Specifically forbidden:
+   - Inventing buyer ages, incomes, professions, family status, origin breakdowns
+   - Inventing psychographic profiles (lifestyle, priorities, decision timelines, influencers)
+   - Inventing demographic percentages or buyer-source percentages
+   - Inventing employer concentration, catchment composition
+   These are NEVER acceptable, even with a [Web Context] label, because such fabrications are indistinguishable from real LF buyer data to a non-expert reader. Labeling fabrication does not make it acceptable.
+4. The ONLY exception: macroeconomic context (RBI rates, policy announcements, infrastructure news) is legitimate web search territory. Buyer demographics, project counts, sector tier rankings, market shares are NOT — these are graph-data questions and must be answered from graph data or honestly declined.
+5. If the user explicitly asks for demographic information that returns zero rows, the correct response is: "Buyer demographic data (age, gender, locality, state, language, religion) is not currently loaded for [city] in the LF Knowledge Base. This dataset exists for [list cities where it IS loaded]. For [requested city], here is the residential market data that is available: [pricing / velocity / inventory / etc.]. To proceed with demographic-driven analysis for [requested city], the IGR sub-registrar files need to be ingested into the graph — please flag this to the data team."
+
+RULE F — TRUST YOUR PRIOR DATA-BACKED ANSWERS ON FOLLOW-UPS:
+When a user asks a follow-up question that references a prior response (e.g., "why is Sector 71 in tier 1?", "justify Sector 76 ranking", "explain the velocity number you gave"), apply this logic:
+
+1. Check whether the CURRENT data block contains the specific rows that backed your prior answer.
+2. If it does — answer the follow-up directly using those rows.
+3. If it does NOT (because the new query routing pulled different queries this turn) — DO NOT conclude your prior response was fabricated. Each conversation turn re-runs intent classification, which may select a different subset of queries. The data you cited previously was real LF data at that turn; it's just not in this turn's data block.
+
+In this case, your response should be: "In the previous response I drew on the [micromarkets_by_demand / top_projects_by_sales / etc.] query, which is not in the current data block. The numbers I cited (e.g., Sector 71: 1,194 units, 7.63% velocity) are from the LF Knowledge Base. If you want me to re-verify, please ask me to re-run the micromarket query explicitly."
+
+Do NOT write phrases like:
+- "I need to correct my previous response"
+- "The previous sector-wise table was not based on verified LF data"
+- "Fabricated micro-market rankings"
+- "I cannot verify"
+…unless you have POSITIVE evidence that the prior numbers were wrong. Self-doubt absent contrary evidence destroys credibility worse than the original error would have. A confident "let me re-verify if you'd like" beats a panicky retraction of correct data every time.
 
 === MICRO-MARKET MAPPING (CRITICAL) ===
 Users often query by corridor names, not sector numbers. Map these to constituent sectors:
@@ -1270,11 +1333,35 @@ def handle_query():
 
     # Step 6: Call Claude
     if stream:
+        # Pre-compute the categories that fired, for audit logging (Fix C)
+        fired_categories = classify_web_intent(user_query) if web_mode else []
+
         def generate():
             try:
                 with client.messages.stream(**api_params) as s:
-                    for text in s.text_stream:
-                        yield f"data: {json.dumps({'type': 'text', 'text': text})}\n\n"
+                    # Iterate raw events so we can capture both text chunks
+                    # AND server_tool_use (web_search) invocations for audit.
+                    for event in s:
+                        et = getattr(event, "type", None)
+                        if et == "content_block_delta":
+                            delta = getattr(event, "delta", None)
+                            if delta is not None and getattr(delta, "type", "") == "text_delta":
+                                txt = getattr(delta, "text", "")
+                                if txt:
+                                    yield f"data: {json.dumps({'type': 'text', 'text': txt})}\n\n"
+                        elif et == "content_block_start":
+                            block = getattr(event, "content_block", None)
+                            btype = getattr(block, "type", "") if block else ""
+                            if btype == "server_tool_use" and getattr(block, "name", "") == "web_search":
+                                # AUDIT LOG — Fix C
+                                search_input = getattr(block, "input", {}) or {}
+                                search_query = search_input.get("query", "<unknown>")
+                                print(
+                                    f"  🔍 [WEB_SEARCH_AUDIT] "
+                                    f"user_query={user_query[:80]!r} "
+                                    f"categories={fired_categories} "
+                                    f"claude_searched={search_query!r}"
+                                )
                 yield f"data: {json.dumps({'type': 'done', 'web_mode': web_mode})}\n\n"
             except Exception as e:
                 print(f"  ✗ Claude streaming error: {e}")
@@ -1287,17 +1374,34 @@ def handle_query():
         )
     else:
         response = client.messages.create(**api_params)
+        # Pre-compute fired categories for audit log (Fix C)
+        fired_categories = classify_web_intent(user_query) if web_mode else []
+
         # Extract text from potentially mixed content blocks (text + web_search results)
         response_text = ""
+        web_searches_made = []
         for block in response.content:
-            if hasattr(block, 'text'):
+            if hasattr(block, "text"):
                 response_text += block.text
+            # AUDIT LOG — Fix C (non-streaming variant)
+            btype = getattr(block, "type", "")
+            if btype == "server_tool_use" and getattr(block, "name", "") == "web_search":
+                search_input = getattr(block, "input", {}) or {}
+                search_query = search_input.get("query", "<unknown>")
+                web_searches_made.append(search_query)
+                print(
+                    f"  🔍 [WEB_SEARCH_AUDIT] "
+                    f"user_query={user_query[:80]!r} "
+                    f"categories={fired_categories} "
+                    f"claude_searched={search_query!r}"
+                )
 
         return jsonify({
             "response": response_text,
             "data_queries": [r["query"] for r in data_results],
             "total_rows": sum(r.get("row_count", 0) for r in data_results),
             "web_mode": web_mode,
+            "web_searches_made": web_searches_made,  # exposed for client/UI audit
         })
 
 
@@ -1354,7 +1458,7 @@ def health():
 @app.route('/', methods=['GET'])
 def root():
     """Root endpoint — Render/Railway may check this too."""
-    return jsonify({"service": "MR&I API v4", "status": "ok"})
+    return jsonify({"service": "MR&I API v4.1", "status": "ok"})
 
 
 if __name__ == '__main__':
@@ -1362,7 +1466,7 @@ if __name__ == '__main__':
     parser.add_argument('--port', type=int, default=5000)
     args = parser.parse_args()
 
-    print(f"MR&I API Server v4 starting on port {args.port}")
+    print(f"MR&I API Server v4.1 starting on port {args.port}")
     print(f"Neo4j: {NEO4J_URI}")
     print(f"Web Intelligence: enabled")
     app.run(host='0.0.0.0', port=args.port, debug=True)
