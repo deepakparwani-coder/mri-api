@@ -1,38 +1,35 @@
 """
-MR&I API Backend v4.3
+MR&I API Backend v4.4
 ======================
 Flask server bridging the HTML frontend, Neo4j graph, and Claude API.
-Web Intelligence integration via Anthropic web_search tool.
 
-v4.3 CHANGES (over v4.2):
-The Hinjewadi demographic query was STILL failing in v4.2 despite Rule E
-having a "check row counts first" guard. Diagnosis (12 May): /api/raw
-endpoint confirmed buyer_age_dist returns 11 real rows. Render logs
-confirmed v4.2 was deployed. So the data path is correct — Claude was
-reading the data and STILL emitting "data not loaded" via Rule E's
-template body. Three targeted fixes:
+v4.4 CHANGES (over v4.3):
+THE REAL ROOT-CAUSE of the Hinjewadi demographic failure was finally found
+via v4.3-DIAG logging. It was NOT a prompt problem at any version — it was
+an intent-classifier flow control bug:
 
-- FIX 1: Rule E body stripped down. The bloated template was teaching
-  Claude exactly what "data not loaded" phrasing to use. Replaced with
-  a short, conditional reference to STEP ZERO. No more template body
-  for Claude to pattern-match into.
-- FIX 2: New STEP ZERO at the very top of SYSTEM_PROMPT_BASE — above
-  ABSOLUTE RULES. Tells Claude to read the DATA-AVAILABILITY SUMMARY
-  before writing anything. First thing Claude sees in the system prompt.
-- FIX 3: format_data_block_for_claude() now emits a
-  "DATA-AVAILABILITY SUMMARY" block at the top of the data, listing
-  which queries returned data vs which returned zero. Programmatic,
-  unambiguous, impossible to pattern-match past.
+The CORRIDOR detection block at the top of classify_intent() was matching
+on the word "hinjewadi" (because it's in CORRIDOR_MAP) and returning
+early with only market_overview + price_trend_saleable in results. The
+buyer/demographic/builder/feasibility blocks that came AFTER were never
+evaluated. So Claude received ONLY market + price data for any Hinjewadi
+question, and correctly said "demographic data not loaded" — because in
+its data block, it genuinely wasn't loaded.
 
-v4.2 CHANGES (preserved): Rule E guard, Rule F unchanged, web audit logging.
-v4.1 CHANGES (preserved): [ZERO ROWS] markers, COVERAGE GAPS footer.
-v4 CHANGES (preserved): needs_web fix, descriptions in run_query.
+v4.4 removes the early-return from the corridor block. Corridor data is
+still appended; subsequent intent blocks also evaluate. This unblocks
+demographic, builder, and other questions about corridor-named cities.
 
-Architecture:
-  User query → classify intent → run Cypher query → get EXACT data + DESCRIPTION →
-  detect if web context needed → format data block (with DATA-AVAILABILITY
-  SUMMARY) → send to Claude (with web_search tool if needed) → Claude
-  reads STEP ZERO + summary → answers from real rows or honestly states gap.
+Also adds a safety cap of 12 queries to prevent runaway query counts.
+
+v4.3-DIAG logging is preserved so we can verify v4.4 fixes the issue.
+Remove the [DIAG-*] prints once smoke test passes.
+
+PREVIOUS VERSIONS (preserved unchanged):
+- v4.3: STEP ZERO + DATA-AVAILABILITY SUMMARY + stripped Rule E
+- v4.2: Rule E row-count guard
+- v4.1: [ZERO ROWS] markers + Rule E/F + web audit logging
+- v4: descriptions, categorized WEB_KEYWORDS, needs_web fix
 """
 
 import os
@@ -440,6 +437,11 @@ def classify_intent(query, city):
     results = []
 
     # ── Check for corridor queries first ──
+    # v4.4: corridor block APPENDS data but does NOT early-return.
+    # The early return in earlier versions was hijacking queries like
+    # "demographics for project in Hinjewadi" — the word "Hinjewadi" matched
+    # the corridor map, causing the buyer/demographic blocks below to never
+    # be evaluated. Now corridor data adds to results and other blocks also fire.
     corridor_sectors = detect_corridor(query)
     if corridor_sectors:
         for sector_pattern in corridor_sectors:
@@ -448,9 +450,8 @@ def classify_intent(query, city):
                 results.append(result)
         results.append(run_query("market_overview", city=city))
         results.append(run_query("price_trend_saleable", city=city))
-        if len(results) > 5:
-            results = results[:5]
-        return results
+        # No early-return — fall through to other intent blocks so demographic /
+        # builder / micromarket-ranking questions about a corridor city still work.
 
     # ── Project-specific query (check FIRST — most specific) ──
     proj_name = extract_project_name(query)
@@ -648,6 +649,12 @@ def classify_intent(query, city):
     # ── Micromarket list / sub-regions / areas ──
     if re.search(r'micro.*market|sub.*region|area.*within|region.*within|localities|zones|which.*areas', q):
         results.append(run_query("micromarket_list", city=city))
+
+    # ═══ Safety cap to keep Anthropic call within timeout. 12 was chosen
+    # because a corridor + demographic combo can fire up to 12 queries
+    # (corridor block: 3, buyer block: 9). Bump higher if needed. ═══
+    if len(results) > 12:
+        results = results[:12]
 
     # ═══ Default: market overview ═══
     if not results:
@@ -1547,7 +1554,7 @@ def health():
 @app.route('/', methods=['GET'])
 def root():
     """Root endpoint — Render/Railway may check this too."""
-    return jsonify({"service": "MR&I API v4.3-DIAG", "status": "ok"})
+    return jsonify({"service": "MR&I API v4.4", "status": "ok"})
 
 
 if __name__ == '__main__':
@@ -1555,7 +1562,7 @@ if __name__ == '__main__':
     parser.add_argument('--port', type=int, default=5000)
     args = parser.parse_args()
 
-    print(f"MR&I API Server v4.3-DIAG starting on port {args.port}")
+    print(f"MR&I API Server v4.4 starting on port {args.port}")
     print(f"Neo4j: {NEO4J_URI}")
     print(f"Web Intelligence: enabled")
     app.run(host='0.0.0.0', port=args.port, debug=True)
