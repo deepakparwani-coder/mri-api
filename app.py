@@ -1,36 +1,38 @@
 """
-MR&I API Backend v4.2
+MR&I API Backend v4.3
 ======================
 Flask server bridging the HTML frontend, Neo4j graph, and Claude API.
 Web Intelligence integration via Anthropic web_search tool.
 
-v4.2 CHANGES (over v4.1):
-- FIX: Rule E now applies ONLY when buyer queries actually returned zero
-  rows. Previously, Claude was saying "data not loaded" even when the data
-  block contained thousands of real buyer-segment rows for Hinjewadi.
-  The fix adds an explicit "check the row counts first" guard at the top
-  of Rule E.
-- FIX: Rule E no longer instructs Claude to name "cities where the dataset
-  exists" — that placeholder was being filled with hallucinated city names.
-- CLEANUP: Removed accidentally-pasted instructional comments at the bottom
-  of classify_intent() (commented-out cap-9 block from the markdown).
+v4.3 CHANGES (over v4.2):
+The Hinjewadi demographic query was STILL failing in v4.2 despite Rule E
+having a "check row counts first" guard. Diagnosis (12 May): /api/raw
+endpoint confirmed buyer_age_dist returns 11 real rows. Render logs
+confirmed v4.2 was deployed. So the data path is correct — Claude was
+reading the data and STILL emitting "data not loaded" via Rule E's
+template body. Three targeted fixes:
 
-v4.1 CHANGES (preserved):
-- format_data_block_for_claude() emits [ZERO ROWS] markers and COVERAGE GAPS footer
-- SYSTEM_PROMPT_BASE adds Rule E (anti-fabrication on zero rows) and Rule F (trust prior data)
-- handle_query() logs every web_search call with [WEB_SEARCH_AUDIT]
+- FIX 1: Rule E body stripped down. The bloated template was teaching
+  Claude exactly what "data not loaded" phrasing to use. Replaced with
+  a short, conditional reference to STEP ZERO. No more template body
+  for Claude to pattern-match into.
+- FIX 2: New STEP ZERO at the very top of SYSTEM_PROMPT_BASE — above
+  ABSOLUTE RULES. Tells Claude to read the DATA-AVAILABILITY SUMMARY
+  before writing anything. First thing Claude sees in the system prompt.
+- FIX 3: format_data_block_for_claude() now emits a
+  "DATA-AVAILABILITY SUMMARY" block at the top of the data, listing
+  which queries returned data vs which returned zero. Programmatic,
+  unambiguous, impossible to pattern-match past.
 
-v4 CHANGES (preserved):
-- needs_web() indentation/double-call bug fixed
-- run_query() carries description from QueryRegistry
-- WEB_KEYWORDS categorized (MONETARY_POLICY, INFRASTRUCTURE, etc.)
-- Description-aware data block sent to Claude
+v4.2 CHANGES (preserved): Rule E guard, Rule F unchanged, web audit logging.
+v4.1 CHANGES (preserved): [ZERO ROWS] markers, COVERAGE GAPS footer.
+v4 CHANGES (preserved): needs_web fix, descriptions in run_query.
 
 Architecture:
   User query → classify intent → run Cypher query → get EXACT data + DESCRIPTION →
-  detect if web context needed → send data + descriptions + query to Claude
-  (with web_search tool if needed) → Claude presents data + web context →
-  stream response back (with web_search audit logging)
+  detect if web context needed → format data block (with DATA-AVAILABILITY
+  SUMMARY) → send to Claude (with web_search tool if needed) → Claude
+  reads STEP ZERO + summary → answers from real rows or honestly states gap.
 """
 
 import os
@@ -668,6 +670,47 @@ def format_data_block_for_claude(data_results, city, corridor_sectors=None):
     lines = []
     lines.append(f"CITY: {city}")
     lines.append("")
+
+    # ─── DATA-AVAILABILITY SUMMARY ───
+    # Programmatic, unambiguous list of which queries returned data and which
+    # didn't. This block exists so Claude cannot pattern-match past it: before
+    # writing any "data not loaded" phrasing, Claude must verify against this
+    # summary. The summary is computed by counting rows in data_results — not
+    # by Claude inferring from the prose below.
+    avail_with_data = []
+    avail_zero_rows = []
+    for result in data_results:
+        if "error" in result and result.get("source") == "error":
+            continue
+        name = result.get("query", "unknown")
+        rc = result.get("row_count", 0)
+        if rc > 0:
+            avail_with_data.append(f"{name} ({rc} rows)")
+        else:
+            avail_zero_rows.append(name)
+
+    lines.append("DATA-AVAILABILITY SUMMARY (programmatically computed — do not override):")
+    if avail_with_data:
+        lines.append(f"  Queries that RETURNED DATA ({len(avail_with_data)}):")
+        for entry in avail_with_data:
+            lines.append(f"    ✓ {entry}")
+    if avail_zero_rows:
+        lines.append(f"  Queries that returned ZERO rows ({len(avail_zero_rows)}):")
+        for name in avail_zero_rows:
+            lines.append(f"    ✗ {name}")
+    if not avail_with_data and not avail_zero_rows:
+        lines.append("  (no queries executed)")
+    lines.append("")
+    lines.append(
+        "BINDING INSTRUCTION: For any user question that the queries listed "
+        "under 'RETURNED DATA' can address, you MUST answer from that data. "
+        "Phrases like 'data not loaded', 'dataset not available', 'coverage "
+        "gap', or 'needs to be ingested' are RESERVED for topics covered "
+        "only by the 'ZERO rows' list above. Using gap-acknowledgment "
+        "phrasing while real rows exist in this data block is a critical "
+        "failure equivalent to fabrication."
+    )
+    lines.append("")
     lines.append(
         "DATA LINEAGE: Every row below was queried directly from the LF "
         "Knowledge Base built from Liases Foras proprietary research data. "
@@ -756,6 +799,21 @@ def format_data_block_for_claude(data_results, city, corridor_sectors=None):
 # ═══════════════════════════════════════
 SYSTEM_PROMPT_BASE = """You are MR&I (Market Research & Intelligence), a precision real estate analytics engine for Indian residential markets.
 
+=== STEP ZERO — READ BEFORE WRITING ANYTHING ===
+
+Every user request comes paired with a "DATA-AVAILABILITY SUMMARY" at the top of the data block. That summary lists:
+- Queries that RETURNED DATA (with row counts)
+- Queries that returned ZERO rows
+
+Before you write a single sentence of response, perform this check:
+
+1. Look at the user's question. Identify what data category it asks about (demographics, pricing, micro-market ranking, project performance, feasibility, etc.).
+2. Look at the DATA-AVAILABILITY SUMMARY. Find queries relevant to the user's category.
+3. If ANY relevant query is in the "RETURNED DATA" list — your answer MUST be built from those rows. You may NOT say "data is not loaded," "dataset not available," "coverage gap," "data not yet ingested," "IGR files need ingestion," or any similar gap-acknowledgment phrase. The data is right there in the block below. Use it.
+4. If ALL relevant queries are in the "ZERO rows" list — and only then — acknowledge the gap honestly.
+
+This is the SINGLE most violated rule in this system. Prior versions of this prompt allowed Claude to say "buyer data not loaded for Hinjewadi" while a data block containing 3,000+ buyer-segment rows for Hinjewadi was sitting in the very same context. Do not repeat this mistake. Read the DATA-AVAILABILITY SUMMARY first. Trust it.
+
 === ABSOLUTE RULES (NEVER VIOLATE) ===
 1. EVERY number you present MUST come from the provided data. ZERO exceptions.
 2. If a specific metric is not in the data, present the CLOSEST AVAILABLE data and clearly label what it represents. For example, if asked about 'Dwarka Expressway' and you have data for constituent sectors (37D, 99, 102, 103, 104) — present those projects grouped by sector. NEVER leave the user with just 'data not available'. NEVER output 'CRITICAL DATA LIMITATION' or 'Data Not Available' as a section header.
@@ -797,30 +855,15 @@ If the user asks about a segment (commercial, retail, industrial) that LF doesn'
 "LF Knowledge Base covers the residential market for this location. For residential benchmarking, the data shows [exact LF numbers]. For commercial/retail pricing, here is web intelligence: [Web Context] [source URL]."
 This is honest, useful, and doesn't fabricate. The user will respect this far more than a fabricated number.
 
-RULE E — ZERO-ROW QUERIES ARE COVERAGE GAPS, NOT INVITATIONS TO FABRICATE:
+RULE E — ZERO-ROW QUERIES ARE COVERAGE GAPS:
+Refer to STEP ZERO at the top of this prompt. This rule applies ONLY when the DATA-AVAILABILITY SUMMARY shows the user's topic-relevant queries are in the "ZERO rows" list. In that case:
 
-THIS RULE APPLIES ONLY WHEN THE DATA BLOCK CONTAINS [ZERO ROWS] MARKERS OR A "COVERAGE GAPS:" FOOTER FOR THE RELEVANT QUERIES. IF THE BUYER QUERIES (buyer_age_dist, buyer_gender_dist, buyer_locality_dist, buyer_state_dist, buyer_religion_dist, buyer_language_dist, buyer_district_dist, buyer_pincode_dist, buyer_category_dist) RETURNED REAL ROWS (count > 0), ANSWER FROM THAT DATA — DO NOT SAY "DATA NOT LOADED."
+- Acknowledge the gap in one short sentence. Do not elaborate on what the data "would have shown."
+- Offer adjacent LF data that IS available (pricing, velocity, supply, etc.) to partially address the question.
+- Do NOT web-search to fabricate substitute demographic, profile, or segment claims. Web search is reserved for macroeconomic context (RBI rates, infrastructure announcements), never for synthesizing missing LF data.
+- Do NOT speculate which other cities "have" the dataset. If the DATA-AVAILABILITY SUMMARY doesn't list cities with coverage, say nothing about other cities — leave the user to ask the data team.
 
-How to tell which case you're in BEFORE writing the response:
-- Scan the data block for "QUERY: buyer_*" entries.
-- Count the rows for each.
-- If ALL buyer query results are 0 rows / marked [ZERO ROWS] → Rule E applies, use the gap-acknowledgment template below.
-- If ANY buyer query returned ≥1 row → answer from the real data. The data is real LF data. Stop. Do not also add a "data not loaded" caveat — that contradicts the data you just received and confuses the user.
-
-This guard exists because earlier responses incorrectly said "data not loaded" while the data block actually contained thousands of real buyer-segment rows. Read the data block before invoking Rule E.
-
-The data block you receive may include queries marked [ZERO ROWS — coverage gap for this city] and a "COVERAGE GAPS:" footer listing them. When you see this (AND ONLY when you see this):
-
-1. State the gap honestly: "The LF Knowledge Base does not currently have [demographic profiles / buyer data / sector-wise breakdowns / etc.] loaded for [city]."
-2. Offer the closest LF data you DO have — pricing, velocity, supply, sales — to partially address the question.
-3. Do NOT web-search the topic and present the web result as a structured analysis. Specifically forbidden:
-   - Inventing buyer ages, incomes, professions, family status, origin breakdowns
-   - Inventing psychographic profiles (lifestyle, priorities, decision timelines, influencers)
-   - Inventing demographic percentages or buyer-source percentages
-   - Inventing employer concentration, catchment composition
-   These are NEVER acceptable, even with a [Web Context] label, because such fabrications are indistinguishable from real LF buyer data to a non-expert reader. Labeling fabrication does not make it acceptable.
-4. The ONLY exception: macroeconomic context (RBI rates, policy announcements, infrastructure news) is legitimate web search territory. Buyer demographics, project counts, sector tier rankings, market shares are NOT — these are graph-data questions and must be answered from graph data or honestly declined.
-5. If the user explicitly asks for demographic information AND ALL buyer queries returned zero rows, the correct response is: "Buyer demographic data (age, gender, locality, state, language, religion) is not currently loaded for [city] in the LF Knowledge Base. For [requested city], here is the residential market data that is available: [pricing / velocity / inventory / etc.]. To proceed with demographic-driven analysis for [requested city], the IGR sub-registrar files need to be ingested into the graph — please flag this to the data team." DO NOT name specific other cities where the dataset "exists" unless the data block explicitly lists them — leave that out rather than guess.
+If the user's topic IS in the "RETURNED DATA" list, Rule E does not apply at all. Answer from the rows.
 
 RULE F — TRUST YOUR PRIOR DATA-BACKED ANSWERS ON FOLLOW-UPS:
 When a user asks a follow-up question that references a prior response (e.g., "why is Sector 71 in tier 1?", "justify Sector 76 ranking", "explain the velocity number you gave"), apply this logic:
@@ -1485,7 +1528,7 @@ def health():
 @app.route('/', methods=['GET'])
 def root():
     """Root endpoint — Render/Railway may check this too."""
-    return jsonify({"service": "MR&I API v4.2", "status": "ok"})
+    return jsonify({"service": "MR&I API v4.3", "status": "ok"})
 
 
 if __name__ == '__main__':
@@ -1493,7 +1536,7 @@ if __name__ == '__main__':
     parser.add_argument('--port', type=int, default=5000)
     args = parser.parse_args()
 
-    print(f"MR&I API Server v4.2 starting on port {args.port}")
+    print(f"MR&I API Server v4.3 starting on port {args.port}")
     print(f"Neo4j: {NEO4J_URI}")
     print(f"Web Intelligence: enabled")
     app.run(host='0.0.0.0', port=args.port, debug=True)
