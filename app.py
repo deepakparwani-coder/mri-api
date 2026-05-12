@@ -1370,6 +1370,25 @@ def handle_query():
         corridor_sectors=corridor_sectors,
     )
 
+    # ═══════════════════════════════════════════════════════════════════
+    # v4.3-DIAG: Comprehensive logging of what Claude actually receives.
+    # Remove or comment out this block once the demographic-query failure
+    # is diagnosed. Each [DIAG-N] tag makes a different fact greppable.
+    # ═══════════════════════════════════════════════════════════════════
+    print(f"[DIAG-1] USER_QUERY: {user_query[:150]!r}")
+    print(f"[DIAG-2] CITY: {city}")
+    print(f"[DIAG-3] QUERIES_FIRED: {[r.get('query') for r in data_results]}")
+    print(f"[DIAG-4] ROW_COUNTS: {[(r.get('query'), r.get('row_count', 0)) for r in data_results]}")
+    print(f"[DIAG-5] DATA_TEXT_LENGTH: {len(data_text)} chars")
+    # Print the first part of data_text — the DATA-AVAILABILITY SUMMARY block
+    # should appear within the first ~2000 chars.
+    print(f"[DIAG-6] DATA_TEXT_HEAD (first 2500 chars):")
+    print("─" * 72)
+    print(data_text[:2500])
+    print("─" * 72)
+    print(f"[DIAG-7] WEB_MODE: {web_mode}")
+    # ═══════════════════════════════════════════════════════════════════
+
     # Step 4: Build messages
     messages = []
     for h in history[-6:]:
@@ -1528,7 +1547,7 @@ def health():
 @app.route('/', methods=['GET'])
 def root():
     """Root endpoint — Render/Railway may check this too."""
-    return jsonify({"service": "MR&I API v4.3", "status": "ok"})
+    return jsonify({"service": "MR&I API v4.3-DIAG", "status": "ok"})
 
 
 if __name__ == '__main__':
@@ -1536,7 +1555,7 @@ if __name__ == '__main__':
     parser.add_argument('--port', type=int, default=5000)
     args = parser.parse_args()
 
-    print(f"MR&I API Server v4.3 starting on port {args.port}")
+    print(f"MR&I API Server v4.3-DIAG starting on port {args.port}")
     print(f"Neo4j: {NEO4J_URI}")
     print(f"Web Intelligence: enabled")
     app.run(host='0.0.0.0', port=args.port, debug=True)
