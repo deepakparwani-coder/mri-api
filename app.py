@@ -1,23 +1,29 @@
 """
-MR&I API Backend v4.1
+MR&I API Backend v4.2
 ======================
 Flask server bridging the HTML frontend, Neo4j graph, and Claude API.
 Web Intelligence integration via Anthropic web_search tool.
 
-v4.1 CHANGES (over v4):
-- FIX A: format_data_block_for_claude() now emits [ZERO ROWS] markers and a
-  COVERAGE GAPS footer when queries return 0 rows. Prevents Claude from
-  papering over data gaps with web-search fabrications.
-- FIX A: System prompt adds Rule E (anti-fabrication on zero rows) and
-  Rule F (trust prior data-backed answers on follow-ups).
-- FIX C: Every web_search tool call is logged with [WEB_SEARCH_AUDIT] —
-  user query, classified categories, and the actual search string Claude
-  sent to Google. Visible in Render Logs tab.
+v4.2 CHANGES (over v4.1):
+- FIX: Rule E now applies ONLY when buyer queries actually returned zero
+  rows. Previously, Claude was saying "data not loaded" even when the data
+  block contained thousands of real buyer-segment rows for Hinjewadi.
+  The fix adds an explicit "check the row counts first" guard at the top
+  of Rule E.
+- FIX: Rule E no longer instructs Claude to name "cities where the dataset
+  exists" — that placeholder was being filled with hallucinated city names.
+- CLEANUP: Removed accidentally-pasted instructional comments at the bottom
+  of classify_intent() (commented-out cap-9 block from the markdown).
+
+v4.1 CHANGES (preserved):
+- format_data_block_for_claude() emits [ZERO ROWS] markers and COVERAGE GAPS footer
+- SYSTEM_PROMPT_BASE adds Rule E (anti-fabrication on zero rows) and Rule F (trust prior data)
+- handle_query() logs every web_search call with [WEB_SEARCH_AUDIT]
 
 v4 CHANGES (preserved):
 - needs_web() indentation/double-call bug fixed
 - run_query() carries description from QueryRegistry
-- WEB_KEYWORDS now categorized (MONETARY_POLICY, INFRASTRUCTURE, etc.)
+- WEB_KEYWORDS categorized (MONETARY_POLICY, INFRASTRUCTURE, etc.)
 - Description-aware data block sent to Claude
 
 Architecture:
@@ -641,16 +647,6 @@ def classify_intent(query, city):
     if re.search(r'micro.*market|sub.*region|area.*within|region.*within|localities|zones|which.*areas', q):
         results.append(run_query("micromarket_list", city=city))
 
-  # ═══ Cap to prevent timeout — raised to 9 for buyer demographics
-#     # (the buyer block adds 9 queries; cap at 5 would silently drop most of them) ═══
-    if len(results) > 9:
-      results = results[:9]
-
-# Important: when 9 buyer queries fire AND the user also triggers another block
-# (e.g. they ask "demographics + market overview"), some queries may still be
-# truncated. Watch the [WEB_INTENT] logs in Render for a few queries after deploy
-# to see if 9 is sufficient. We can raise further if needed.
-
     # ═══ Default: market overview ═══
     if not results:
         results.append(run_query("market_overview", city=city))
@@ -802,7 +798,18 @@ If the user asks about a segment (commercial, retail, industrial) that LF doesn'
 This is honest, useful, and doesn't fabricate. The user will respect this far more than a fabricated number.
 
 RULE E — ZERO-ROW QUERIES ARE COVERAGE GAPS, NOT INVITATIONS TO FABRICATE:
-The data block you receive may include queries marked [ZERO ROWS — coverage gap for this city] and a "COVERAGE GAPS:" footer listing them. When you see this:
+
+THIS RULE APPLIES ONLY WHEN THE DATA BLOCK CONTAINS [ZERO ROWS] MARKERS OR A "COVERAGE GAPS:" FOOTER FOR THE RELEVANT QUERIES. IF THE BUYER QUERIES (buyer_age_dist, buyer_gender_dist, buyer_locality_dist, buyer_state_dist, buyer_religion_dist, buyer_language_dist, buyer_district_dist, buyer_pincode_dist, buyer_category_dist) RETURNED REAL ROWS (count > 0), ANSWER FROM THAT DATA — DO NOT SAY "DATA NOT LOADED."
+
+How to tell which case you're in BEFORE writing the response:
+- Scan the data block for "QUERY: buyer_*" entries.
+- Count the rows for each.
+- If ALL buyer query results are 0 rows / marked [ZERO ROWS] → Rule E applies, use the gap-acknowledgment template below.
+- If ANY buyer query returned ≥1 row → answer from the real data. The data is real LF data. Stop. Do not also add a "data not loaded" caveat — that contradicts the data you just received and confuses the user.
+
+This guard exists because earlier responses incorrectly said "data not loaded" while the data block actually contained thousands of real buyer-segment rows. Read the data block before invoking Rule E.
+
+The data block you receive may include queries marked [ZERO ROWS — coverage gap for this city] and a "COVERAGE GAPS:" footer listing them. When you see this (AND ONLY when you see this):
 
 1. State the gap honestly: "The LF Knowledge Base does not currently have [demographic profiles / buyer data / sector-wise breakdowns / etc.] loaded for [city]."
 2. Offer the closest LF data you DO have — pricing, velocity, supply, sales — to partially address the question.
@@ -813,7 +820,7 @@ The data block you receive may include queries marked [ZERO ROWS — coverage ga
    - Inventing employer concentration, catchment composition
    These are NEVER acceptable, even with a [Web Context] label, because such fabrications are indistinguishable from real LF buyer data to a non-expert reader. Labeling fabrication does not make it acceptable.
 4. The ONLY exception: macroeconomic context (RBI rates, policy announcements, infrastructure news) is legitimate web search territory. Buyer demographics, project counts, sector tier rankings, market shares are NOT — these are graph-data questions and must be answered from graph data or honestly declined.
-5. If the user explicitly asks for demographic information that returns zero rows, the correct response is: "Buyer demographic data (age, gender, locality, state, language, religion) is not currently loaded for [city] in the LF Knowledge Base. This dataset exists for [list cities where it IS loaded]. For [requested city], here is the residential market data that is available: [pricing / velocity / inventory / etc.]. To proceed with demographic-driven analysis for [requested city], the IGR sub-registrar files need to be ingested into the graph — please flag this to the data team."
+5. If the user explicitly asks for demographic information AND ALL buyer queries returned zero rows, the correct response is: "Buyer demographic data (age, gender, locality, state, language, religion) is not currently loaded for [city] in the LF Knowledge Base. For [requested city], here is the residential market data that is available: [pricing / velocity / inventory / etc.]. To proceed with demographic-driven analysis for [requested city], the IGR sub-registrar files need to be ingested into the graph — please flag this to the data team." DO NOT name specific other cities where the dataset "exists" unless the data block explicitly lists them — leave that out rather than guess.
 
 RULE F — TRUST YOUR PRIOR DATA-BACKED ANSWERS ON FOLLOW-UPS:
 When a user asks a follow-up question that references a prior response (e.g., "why is Sector 71 in tier 1?", "justify Sector 76 ranking", "explain the velocity number you gave"), apply this logic:
@@ -1478,7 +1485,7 @@ def health():
 @app.route('/', methods=['GET'])
 def root():
     """Root endpoint — Render/Railway may check this too."""
-    return jsonify({"service": "MR&I API v4.1", "status": "ok"})
+    return jsonify({"service": "MR&I API v4.2", "status": "ok"})
 
 
 if __name__ == '__main__':
@@ -1486,7 +1493,7 @@ if __name__ == '__main__':
     parser.add_argument('--port', type=int, default=5000)
     args = parser.parse_args()
 
-    print(f"MR&I API Server v4.1 starting on port {args.port}")
+    print(f"MR&I API Server v4.2 starting on port {args.port}")
     print(f"Neo4j: {NEO4J_URI}")
     print(f"Web Intelligence: enabled")
     app.run(host='0.0.0.0', port=args.port, debug=True)
