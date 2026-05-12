@@ -643,9 +643,9 @@ def classify_intent(query, city):
 
   # ═══ Cap to prevent timeout — raised to 9 for buyer demographics
 #     # (the buyer block adds 9 queries; cap at 5 would silently drop most of them) ═══
-#     if len(results) > 9:
-#         results = results[:9]
-#
+    if len(results) > 9:
+      results = results[:9]
+
 # Important: when 9 buyer queries fire AND the user also triggers another block
 # (e.g. they ask "demographics + market overview"), some queries may still be
 # truncated. Watch the [WEB_INTENT] logs in Render for a few queries after deploy
