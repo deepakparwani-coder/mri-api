@@ -1414,7 +1414,7 @@ def handle_query():
     token_limit = 8000 if is_feasibility else 4000
 
     api_params = {
-        "model": "claude-sonnet-4-20250514",
+        "model": os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6"),
         "max_tokens": token_limit,
         "system": system_prompt,
         "messages": messages,

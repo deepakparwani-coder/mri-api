@@ -1488,7 +1488,7 @@ function go(){
   if (needsWeb) hint("Searching web for latest context...");
   else hint("Generating...");
   var _webMode = needsWeb;
-  var reqBody = {model:"claude-sonnet-4-20250514",max_tokens:4000,stream:true,system:sysp(needsWeb),messages:hist.slice(0,-1).slice(-6).concat([{role:"user",content:contentParts}])};
+  var reqBody = {model:"claude-sonnet-4-6",max_tokens:4000,stream:true,system:sysp(needsWeb),messages:hist.slice(0,-1).slice(-6).concat([{role:"user",content:contentParts}])};
   if (needsWeb) { reqBody.tools = [{type:"web_search_20250305",name:"web_search",max_uses:3}]; }
   var reqHeaders = {"Content-Type":"application/json","x-api-key":API_KEY,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true","anthropic-beta":"pdfs-2024-09-25"};
   
