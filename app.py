@@ -53,6 +53,9 @@ except ImportError:
     print("pip install anthropic")
     exit(1)
 
+# ── PIN-PASTE: geo resolution ──
+from geo_resolver import extract_pin, resolve_pin
+
 # Import our queries (now a QueryRegistry, not a plain dict)
 from cypher_queries import QUERIES
 
@@ -165,6 +168,38 @@ def run_query(query_name, **params):
         "data": records,
         "source": "LF_Research_Database",
     }
+
+
+# ── TRUST-UI: cached "data through" vintage per city ──
+_VINTAGE_CACHE = {}
+def get_data_vintage(city):
+    """Latest quarter present for this city, e.g. 'Q2 25-26'. Cached per process."""
+    if city not in _VINTAGE_CACHE:
+        try:
+            with get_driver().session() as s:
+                rec = s.run(
+                    "MATCH (c:City {name:$city})-[r]->(q:Quarter) "
+                    "RETURN q.name AS q ORDER BY q.sort_order DESC LIMIT 1",
+                    city=city).single()
+            _VINTAGE_CACHE[city] = rec["q"] if rec else None
+        except Exception:
+            _VINTAGE_CACHE[city] = None
+    return _VINTAGE_CACHE[city]
+
+
+# ── PIN-PASTE: per-city micromarket name cache (for locality matching) ──
+_MM_CACHE = {}
+def get_micromarket_names(city):
+    if city not in _MM_CACHE:
+        try:
+            with get_driver().session() as s:
+                recs = s.run(
+                    "MATCH (mm:MicroMarket)<-[*0..1]-(c:City {name:$city}) "
+                    "RETURN DISTINCT mm.name AS name", city=city).data()
+            _MM_CACHE[city] = [r["name"] for r in recs]
+        except Exception:
+            _MM_CACHE[city] = []
+    return _MM_CACHE[city]
 
 
 # ═══════════════════════════════════════
@@ -1364,6 +1399,33 @@ def handle_query():
         print(f"Neo4j query failed: {e}")
         return jsonify({"error": f"Database connection issue: {str(e)}. Please try again."}), 503
 
+    # ── PIN-PASTE: detect Google Maps link / raw coordinates ──
+    pin = extract_pin(user_query)
+    geo = None
+    if pin:
+        geo = resolve_pin(pin, known_micromarkets=get_micromarket_names(city), city=city)
+        print(f"  📍 [PIN] {geo.get('lat')},{geo.get('lng')} -> locality={geo.get('locality')!r} "
+              f"mm={geo.get('matched_micromarket')!r} regime={geo.get('regulatory_regime')}")
+        if geo.get("lat") is not None:
+            data_results.append(run_query("pin_catchment",
+                city=city, lat=geo["lat"], lng=geo["lng"], radius_km=5.0))
+        if geo.get("matched_micromarket"):
+            data_results.append(run_query("micromarket_detail",
+                city=city, location=geo["matched_micromarket"]))
+        data_results.append({
+            "query": "pin_resolution",
+            "description": ("Resolved from the Google Maps pin the user pasted. "
+                            "locality/city/state come from reverse geocoding the pin "
+                            "coordinates (OpenStreetMap). regulatory_regime tells you "
+                            "which framework applies: UDCPR (Maharashtra) or WBHIRA_KMC "
+                            "(West Bengal). Treat as location context, not LF market data."),
+            "params": {}, "row_count": 1,
+            "data": [{k: geo.get(k) for k in
+                      ("lat","lng","locality","city","state",
+                       "matched_micromarket","match_confidence","regulatory_regime")}],
+            "source": "GeoResolver_pin",
+        })
+
     # Step 2: Detect if web intelligence is needed
     web_mode = needs_web(user_query)
     if web_mode:
@@ -1458,7 +1520,16 @@ def handle_query():
                                     f"categories={fired_categories} "
                                     f"claude_searched={search_query!r}"
                                 )
-                yield f"data: {json.dumps({'type': 'done', 'web_mode': web_mode})}\n\n"
+                done_meta = {
+                    'type': 'done',
+                    'web_mode': web_mode,
+                    'data_queries': [r.get('query') for r in data_results],
+                    'row_counts': {r.get('query'): r.get('row_count', 0) for r in data_results},
+                    'total_rows': sum(r.get('row_count', 0) for r in data_results),
+                    'data_through': get_data_vintage(city),
+                    'city': city,
+                }
+                yield f"data: {json.dumps(done_meta)}\n\n"
             except Exception as e:
                 print(f"  ✗ Claude streaming error: {e}")
                 yield f"data: {json.dumps({'type': 'error', 'text': str(e)})}\n\n"

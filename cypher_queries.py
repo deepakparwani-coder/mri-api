@@ -27,6 +27,28 @@ QUERY_DEFINITIONS = {
     # MARKET OVERVIEW (L0)
     # ═══════════════════════════════════════
 
+    "pin_catchment": {
+        "description": (
+            "Micromarkets within radius_km of the map pin the user pasted, with "
+            "distances in km. Computed geometrically from geocoded micromarket "
+            "coordinates (point.distance). Use this to define the catchment for "
+            "feasibility analysis. If zero rows, geocoding enrichment has not been "
+            "run for this city — say the spatial catchment is unavailable and fall "
+            "back to the matched micromarket only. Distances are point-to-point."
+        ),
+        "cypher": """
+            MATCH (mm:MicroMarket)<-[*0..1]-(c:City {name:$city})
+            WHERE mm.location IS NOT NULL
+            WITH DISTINCT mm,
+                 point.distance(mm.location,
+                     point({latitude:$lat, longitude:$lng})) / 1000.0 AS km
+            WHERE km <= $radius_km
+            RETURN mm.name AS micromarket, round(km, 1) AS distance_km
+            ORDER BY km
+            LIMIT 12
+        """,
+    },
+
     "market_overview": {
         "description": (
             "City-level snapshot for the latest 4 quarters. Returns per quarter: "
