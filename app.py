@@ -38,7 +38,7 @@ import re
 import argparse
 import time
 from collections import defaultdict
-from flask import Flask, request, jsonify, Response, stream_with_context
+from flask import Flask, request, jsonify, Response, stream_with_context, send_from_directory
 from flask_cors import CORS
 
 try:
@@ -1620,6 +1620,14 @@ def health():
     else:
         status["neo4j"] = "not configured"
     return jsonify(status)
+
+
+# ── ONE-URL: serve the frontend from this same app (same origin, no ngrok) ──
+@app.route('/app', methods=['GET'])
+def serve_ui():
+    """The product UI. Always reflects the deployed mri_v3.html — no local copies."""
+    return send_from_directory(
+        os.path.dirname(os.path.abspath(__file__)), 'mri_v3.html', max_age=0)
 
 
 @app.route('/', methods=['GET'])
