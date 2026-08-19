@@ -46,23 +46,37 @@ MAPS_URL_RE = re.compile(
     r'https?://(?:www\.)?(?:google\.[a-z.]+/maps|maps\.google\.[a-z.]+|'
     r'maps\.app\.goo\.gl|goo\.gl/maps)[^\s<>"\']*', re.IGNORECASE)
 
-# ── Coordinate patterns, most trustworthy first ──────────────────────────────
-# Applied to BOTH the final URL and the response body.
-_COORD_PATTERNS = [
-    # staticmap preview in og:image — present on virtually every share page and
-    # always the pin itself, not the viewport. This is the one that rescues
-    # goo.gl links.
-    (re.compile(r'staticmap[^"\'\s]*?center=(-?\d{1,2}\.\d+)(?:%2C|,)\s*(-?\d{1,3}\.\d+)'), 'og_staticmap'),
-    # canonical pin encoding
+# ── Coordinate patterns ─────────────────────────────────────────────────────
+# ORDER MATTERS AND THE ORDER IS NOT OBVIOUS.
+#
+# The share link https://maps.app.goo.gl/RHAhAyRmfEjLZXNJ7 resolves to
+#   https://www.google.com/maps/search/18.584477,+73.736395?entry=tts&...
+# i.e. the true pin sits in the URL PATH. The page body of that same response
+# also contains an og:image staticmap pointing at 19.117286,72.859648 — a
+# generic Google image of Andheri East, Mumbai, 110 km away. Trusting the
+# staticmap first (as an earlier version of this file did) silently produced a
+# Mumbai answer for a Pune plot.
+#
+# Rule: coordinates in the FINAL URL are authoritative. Body patterns are a
+# fallback only, and the staticmap goes last among them because it is the one
+# that can be a decoy.
+_URL_COORD_PATTERNS = [
+    (re.compile(r'/maps/search/(-?\d{1,2}\.\d+),\s*\+?\s*(-?\d{1,3}\.\d+)'), 'path_search'),
+    (re.compile(r'/maps/place/(-?\d{1,2}\.\d+),\s*\+?\s*(-?\d{1,3}\.\d+)'), 'path_place'),
+    (re.compile(r'/maps/dir/[^/]*/(-?\d{1,2}\.\d+),\s*\+?\s*(-?\d{1,3}\.\d+)'), 'path_dir'),
     (re.compile(r'!3d(-?\d{1,2}\.\d+)!4d(-?\d{1,3}\.\d+)'), 'pin_3d4d'),
-    (re.compile(r'[?&]q=(-?\d{1,2}\.\d+),\s*(-?\d{1,3}\.\d+)'), 'query_q'),
+    (re.compile(r'[?&]q=(-?\d{1,2}\.\d+),\s*\+?\s*(-?\d{1,3}\.\d+)'), 'query_q'),
     (re.compile(r'[?&]ll=(-?\d{1,2}\.\d+),\s*(-?\d{1,3}\.\d+)'), 'query_ll'),
     (re.compile(r'[?&]destination=(-?\d{1,2}\.\d+),\s*(-?\d{1,3}\.\d+)'), 'query_destination'),
-    (re.compile(r'"latitude"\s*:\s*(-?\d{1,2}\.\d+)\s*,\s*"longitude"\s*:\s*(-?\d{1,3}\.\d+)'), 'json_latlng'),
-    # viewport centre — least precise, so last
+    (re.compile(r'[?&]center=(-?\d{1,2}\.\d+),\s*(-?\d{1,3}\.\d+)'), 'query_center'),
     (re.compile(r'/@(-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)'), 'viewport_at'),
 ]
-# APP_INITIALIZATION_STATE stores [null,null,LNG,LAT] — note the reversed order.
+_BODY_COORD_PATTERNS = [
+    (re.compile(r'!3d(-?\d{1,2}\.\d+)!4d(-?\d{1,3}\.\d+)'), 'body_pin_3d4d'),
+    (re.compile(r'"latitude"\s*:\s*(-?\d{1,2}\.\d+)\s*,\s*"longitude"\s*:\s*(-?\d{1,3}\.\d+)'), 'body_json_latlng'),
+    (re.compile(r'staticmap[^"\'\s]*?center=(-?\d{1,2}\.\d+)(?:%2C|,)\s*(-?\d{1,3}\.\d+)'), 'body_og_staticmap'),
+]
+_COORD_PATTERNS = _URL_COORD_PATTERNS          # back-compat for callers/tests
 _APP_INIT_RE = re.compile(r'\[\s*null\s*,\s*null\s*,\s*(-?\d{1,3}\.\d{4,})\s*,\s*(-?\d{1,2}\.\d{4,})\s*\]')
 _META_REFRESH_RE = re.compile(r'http-equiv=["\']?refresh["\']?[^>]*url=([^"\'>\s]+)', re.I)
 _OG_TITLE_RE = re.compile(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)', re.I)
@@ -75,11 +89,11 @@ def _india_sane(lat, lng):
     return 6.0 <= lat <= 37.5 and 68.0 <= lng <= 97.5
 
 
-def _scan_for_coords(text):
+def _scan_for_coords(text, patterns=None):
     """Return (lat, lng, pattern_name) from any supported encoding, or None."""
     if not text:
         return None
-    for pat, name in _COORD_PATTERNS:
+    for pat, name in (patterns or _URL_COORD_PATTERNS):
         for m in pat.finditer(text):
             try:
                 lat, lng = float(m.group(1)), float(m.group(2))
@@ -87,14 +101,32 @@ def _scan_for_coords(text):
                 continue
             if _india_sane(lat, lng):
                 return lat, lng, name
-    for m in _APP_INIT_RE.finditer(text):          # note: lng first
+    return None
+
+
+def _scan_body(body):
+    if not body:
+        return None
+    hit = _scan_for_coords(body, _BODY_COORD_PATTERNS)
+    if hit:
+        return hit
+    for m in _APP_INIT_RE.finditer(body):          # note: lng stored before lat
         try:
             lng, lat = float(m.group(1)), float(m.group(2))
         except (TypeError, ValueError):
             continue
         if _india_sane(lat, lng):
-            return lat, lng, 'app_init_state'
+            return lat, lng, 'body_app_init_state'
     return None
+
+
+def _km(lat1, lng1, lat2, lng2):
+    import math
+    R = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2 - lat1), math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(a))
 
 
 def fetch_url(url, timeout=10, max_redirects=5):
@@ -159,10 +191,27 @@ def extract_pin(text):
         path.append("fetched")
         decoded = urllib.parse.unquote(final_url)
 
-        hit = _scan_for_coords(decoded) or _scan_for_coords(body)
-        if hit:
-            return {"lat": hit[0], "lng": hit[1], "source_url": final_url,
-                    "resolution_path": "+".join(path) + ":" + hit[2]}
+        url_hit = _scan_for_coords(decoded)
+        body_hit = _scan_body(body)
+
+        # URL wins. If the body disagrees materially, say so rather than
+        # silently picking one - a 110 km disagreement is what a decoy
+        # staticmap looks like.
+        if url_hit:
+            out = {"lat": url_hit[0], "lng": url_hit[1], "source_url": final_url,
+                   "resolution_path": "+".join(path) + ":" + url_hit[2]}
+            if body_hit:
+                d = _km(url_hit[0], url_hit[1], body_hit[0], body_hit[1])
+                if d > 25:
+                    out["coord_conflict_km"] = round(d, 1)
+                    out["coord_conflict_note"] = (
+                        f"page body also contained {body_hit[0]},{body_hit[1]} "
+                        f"({body_hit[2]}) {d:.0f} km away - ignored, URL is authoritative")
+            return out
+        if body_hit:
+            return {"lat": body_hit[0], "lng": body_hit[1], "source_url": final_url,
+                    "resolution_path": "+".join(path) + ":" + body_hit[2],
+                    "confidence_note": "from page body, not the URL - verify against the place name"}
 
         place = _place_from(decoded, body)
         return {"lat": None, "lng": None, "source_url": final_url,
