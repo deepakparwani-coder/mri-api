@@ -1473,10 +1473,7 @@ def handle_query():
 
     # Feasibility queries need more tokens for comprehensive reports
     is_feasibility = bool(re.search(r'feasib|plot.*area|acre|fsi|dcr|google.*map|site.*intel', user_query, re.IGNORECASE))
-    # A full feasibility report runs well past 8000 output tokens; at that
-    # ceiling it stopped mid-table with no citation footer. Overridable.
-    token_limit = int(os.environ.get("MRI_MAX_TOKENS_FEASIBILITY", "16000")) \
-        if is_feasibility else int(os.environ.get("MRI_MAX_TOKENS", "8000"))
+    token_limit = 8000 if is_feasibility else 4000
 
     api_params = {
         "model": os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6"),
@@ -1499,56 +1496,30 @@ def handle_query():
 
         def generate():
             try:
-                # Loop so a max_tokens stop resumes instead of ending the report
-                # mid-sentence. Text streams to the client as it arrives; the
-                # continuation simply keeps the same stream going.
-                _params = api_params
-                _full = ""
-                _round = 0
-                _truncated = True
-                while True:
-                    _chunk = ""
-                    with client.messages.stream(**_params) as s:
-                        # Iterate raw events so we can capture both text chunks
-                        # AND server_tool_use (web_search) invocations for audit.
-                        for event in s:
-                            et = getattr(event, "type", None)
-                            if et == "content_block_delta":
-                                delta = getattr(event, "delta", None)
-                                if delta is not None and getattr(delta, "type", "") == "text_delta":
-                                    txt = getattr(delta, "text", "")
-                                    if txt:
-                                        _chunk += txt
-                                        yield f"data: {json.dumps({'type': 'text', 'text': txt})}\n\n"
-                            elif et == "content_block_start":
-                                block = getattr(event, "content_block", None)
-                                btype = getattr(block, "type", "") if block else ""
-                                if btype == "server_tool_use" and getattr(block, "name", "") == "web_search":
-                                    # AUDIT LOG — Fix C
-                                    search_input = getattr(block, "input", {}) or {}
-                                    search_query = search_input.get("query", "<unknown>")
-                                    print(
-                                        f"  🔍 [WEB_SEARCH_AUDIT] "
-                                        f"user_query={user_query[:80]!r} "
-                                        f"categories={fired_categories} "
-                                        f"claude_searched={search_query!r}"
-                                    )
-                        _final = s.get_final_message()
-                    _full += _chunk
-                    _stop = getattr(_final, "stop_reason", None)
-                    if _stop != "max_tokens":
-                        _truncated = False
-                        break
-                    _round += 1
-                    print(f"  [TRUNCATION] stop_reason=max_tokens, continuation {_round}/{MAX_CONTINUATIONS}")
-                    if _round >= MAX_CONTINUATIONS:
-                        break
-                    _params = _continuation_params(api_params, _full)
-
-                if _truncated:
-                    print("  [TRUNCATION] still incomplete after continuations - marking")
-                    yield f"data: {json.dumps({'type': 'text', 'text': TRUNCATION_MARKER})}\n\n"
-
+                with client.messages.stream(**api_params) as s:
+                    # Iterate raw events so we can capture both text chunks
+                    # AND server_tool_use (web_search) invocations for audit.
+                    for event in s:
+                        et = getattr(event, "type", None)
+                        if et == "content_block_delta":
+                            delta = getattr(event, "delta", None)
+                            if delta is not None and getattr(delta, "type", "") == "text_delta":
+                                txt = getattr(delta, "text", "")
+                                if txt:
+                                    yield f"data: {json.dumps({'type': 'text', 'text': txt})}\n\n"
+                        elif et == "content_block_start":
+                            block = getattr(event, "content_block", None)
+                            btype = getattr(block, "type", "") if block else ""
+                            if btype == "server_tool_use" and getattr(block, "name", "") == "web_search":
+                                # AUDIT LOG — Fix C
+                                search_input = getattr(block, "input", {}) or {}
+                                search_query = search_input.get("query", "<unknown>")
+                                print(
+                                    f"  🔍 [WEB_SEARCH_AUDIT] "
+                                    f"user_query={user_query[:80]!r} "
+                                    f"categories={fired_categories} "
+                                    f"claude_searched={search_query!r}"
+                                )
                 done_meta = {
                     'type': 'done',
                     'web_mode': web_mode,
@@ -1569,30 +1540,16 @@ def handle_query():
             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
         )
     else:
-        # Same continuation loop as the streaming path.
-        _params = api_params
-        _parts = []
-        _round = 0
-        _truncated = True
-        while True:
-            response = client.messages.create(**_params)
-            _parts.append("".join(b.text for b in response.content if hasattr(b, "text")))
-            if getattr(response, "stop_reason", None) != "max_tokens":
-                _truncated = False
-                break
-            _round += 1
-            print(f"  [TRUNCATION] stop_reason=max_tokens, continuation {_round}/{MAX_CONTINUATIONS}")
-            if _round >= MAX_CONTINUATIONS:
-                break
-            _params = _continuation_params(api_params, "".join(_parts))
-        _continued_text = "".join(_parts) + (TRUNCATION_MARKER if _truncated else "")
+        response = client.messages.create(**api_params)
         # Pre-compute fired categories for audit log (Fix C)
         fired_categories = classify_web_intent(user_query) if web_mode else []
 
         # Extract text from potentially mixed content blocks (text + web_search results)
-        response_text = _continued_text
+        response_text = ""
         web_searches_made = []
         for block in response.content:
+            if hasattr(block, "text"):
+                response_text += block.text
             # AUDIT LOG — Fix C (non-streaming variant)
             btype = getattr(block, "type", "")
             if btype == "server_tool_use" and getattr(block, "name", "") == "web_search":
@@ -1608,44 +1565,11 @@ def handle_query():
 
         return jsonify({
             "response": response_text,
-            "truncated": _truncated,
             "data_queries": [r["query"] for r in data_results],
             "total_rows": sum(r.get("row_count", 0) for r in data_results),
             "web_mode": web_mode,
             "web_searches_made": web_searches_made,  # exposed for client/UI audit
         })
-
-
-# ── Truncation handling ─────────────────────────────────────────────────────
-MAX_CONTINUATIONS = int(os.environ.get("MRI_MAX_CONTINUATIONS", "4"))
-
-CONTINUE_INSTRUCTION = (
-    "Your previous message was cut off because it reached the output limit. "
-    "Continue from exactly where you stopped. Do not repeat any content already "
-    "written, do not re-introduce the report, and do not summarise what came "
-    "before. If you were part-way through a table row, finish that row first. "
-    "End with the mandatory Data Source / Data Period / City / Confidence / "
-    "Basis footer."
-)
-
-TRUNCATION_MARKER = (
-    "\n\n---\n\n**INCOMPLETE REPORT — OUTPUT LIMIT REACHED**\n\n"
-    "This response was cut off after several continuation attempts and is "
-    "missing content, including its source-citation footer. Do not treat the "
-    "figures above as a complete analysis. Re-run with a narrower question, or "
-    "raise MRI_MAX_TOKENS_FEASIBILITY.\n"
-)
-
-
-def _continuation_params(api_params, text_so_far):
-    """Build the follow-up request that resumes a truncated answer."""
-    p = dict(api_params)
-    # the API rejects an assistant turn with trailing whitespace
-    p["messages"] = list(api_params["messages"]) + [
-        {"role": "assistant", "content": text_so_far.rstrip()},
-        {"role": "user", "content": CONTINUE_INSTRUCTION},
-    ]
-    return p
 
 
 @app.route('/api/raw', methods=['POST'])
