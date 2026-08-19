@@ -1477,6 +1477,15 @@ def handle_query():
     print(f"[DIAG-7] WEB_MODE: {web_mode}")
     # ═══════════════════════════════════════════════════════════════════
 
+    # Feasibility arithmetic is computed in Python and handed to the model as
+    # fixed data. Prose maths produced a 7% area error, a sensitivity matrix
+    # where 12 of 20 cells did not reconcile, and an IRR off by 18 points -
+    # none of which raised an error.
+    _feas_block, _feas_why = build_feasibility_block(user_query, data_results)
+    print(f"[DIAG-8] FEASIBILITY_CALC: {_feas_why}")
+    if _feas_block:
+        data_text = data_text + "\n\n" + _feas_block
+
     # Step 4: Build messages
     messages = []
     for h in history[-6:]:
@@ -1681,6 +1690,70 @@ def _continuation_params(api_params, text_so_far, stop_reason="max_tokens"):
                                      else CONTINUE_INSTRUCTION)},
     ]
     return p
+
+
+# ── Deterministic feasibility ───────────────────────────────────────────────
+try:
+    from feasibility import parse_feasibility_inputs, compute as _feas_compute, \
+        render_markdown as _feas_render
+    _FEAS_OK = True
+except Exception as _e:            # module missing -> behave exactly as before
+    print(f"  [FEAS] calculator unavailable ({_e}); falling back to prose maths")
+    _FEAS_OK = False
+
+
+def _lf_price_and_velocity(data_results):
+    """Pull the latest wt-avg saleable price and monthly velocity out of the
+    LF rows already fetched, so the calculator uses knowledge-base figures."""
+    price = velocity = None
+    for r in data_results or []:
+        rows = r.get("data") or r.get("rows") or []
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            for k, v in row.items():
+                if v in (None, ""):
+                    continue
+                lk = str(k).lower()
+                try:
+                    fv = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if price is None and ("wt_avg" in lk or "price_psf" in lk
+                                      or lk in ("price", "wt_avg_price", "saleable_price")):
+                    if 1000 < fv < 100000:
+                        price = fv
+                if velocity is None and "velocit" in lk and 0 < fv < 50:
+                    velocity = fv
+    return price, velocity
+
+
+def build_feasibility_block(user_query, data_results):
+    """Return (markdown_block, diagnostic) - block is None when not applicable."""
+    if not _FEAS_OK:
+        return None, "calculator unavailable"
+    try:
+        inp = parse_feasibility_inputs(user_query)
+    except Exception as e:
+        return None, f"parse error: {e}"
+    if inp is None:
+        return None, "not a feasibility query"
+
+    lf_price, lf_vel = _lf_price_and_velocity(data_results)
+    if inp.price_psf is None and lf_price:
+        inp.price_psf = lf_price
+        inp.price_psf_source = "LF knowledge base (latest quarter)"
+    if inp.monthly_velocity_pct is None and lf_vel:
+        inp.monthly_velocity_pct = lf_vel
+
+    if not inp.is_sufficient() or inp.price_psf is None:
+        return None, "insufficient inputs: " + ", ".join(inp.missing())
+    try:
+        return _feas_render(_feas_compute(inp)), "computed"
+    except Exception as e:
+        return None, f"compute error: {e}"
 
 
 @app.route('/api/raw', methods=['POST'])
