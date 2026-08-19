@@ -1163,6 +1163,25 @@ When analyzing product mix:
 
 This is the MOST IMPORTANT analysis mode. When a CXO or land acquisition head asks for feasibility, they expect a report that matches what Anarock, Knight Frank, or CBRE would deliver. Follow this EXACT framework:
 
+**STEP 0 - EXECUTIVE VERDICT (WRITE THIS FIRST, BEFORE ANYTHING ELSE)**
+
+Open every feasibility report with a short verdict block, then produce the
+detailed steps below to justify it. The verdict is the single thing the reader
+needs; it must never be the part that goes missing.
+
+**VERDICT: [GO / CONDITIONAL GO / NO-GO]**
+- Site score: [x]/80 - [STRONG / MODERATE / WEAK]
+- Margin at market price: [x]% | IRR: [x]% | Equity multiple: [x]x
+- Maximum viable land cost: Rs.[x] Cr (vs Rs.[y] Cr asked)
+- Single biggest risk: [one line]
+- Single biggest upside: [one line]
+
+If a number is not yet computed when you write this block, state the value you
+will compute and keep it consistent with the detail that follows. If the user
+gave no land cost, the verdict is the MAXIMUM VIABLE LAND COST, stated plainly.
+
+Then continue with Steps 1-7. Step 7 repeats the verdict with full reasoning.
+
 **STEP 1 — LOCATION IDENTIFICATION**
 If the user provides a Google Maps URL:
 - Extract the coordinates from the URL (look for patterns like @18.574949,73.689848 or place/18°34'29.8"N+73°41'23.5"E)
@@ -1536,17 +1555,17 @@ def handle_query():
                         _final = s.get_final_message()
                     _full += _chunk
                     _stop = getattr(_final, "stop_reason", None)
-                    if _stop != "max_tokens":
+                    if _stop not in CONTINUABLE_STOPS:
                         _truncated = False
                         break
                     _round += 1
-                    print(f"  [TRUNCATION] stop_reason=max_tokens, continuation {_round}/{MAX_CONTINUATIONS}")
+                    print(f"  [INCOMPLETE] stop_reason={_stop}, continuation {_round}/{MAX_CONTINUATIONS}")
                     if _round >= MAX_CONTINUATIONS:
                         break
-                    _params = _continuation_params(api_params, _full)
+                    _params = _continuation_params(api_params, _full, _stop)
 
                 if _truncated:
-                    print("  [TRUNCATION] still incomplete after continuations - marking")
+                    print("  [INCOMPLETE] still unfinished after continuations - marking")
                     yield f"data: {json.dumps({'type': 'text', 'text': TRUNCATION_MARKER})}\n\n"
 
                 done_meta = {
@@ -1577,14 +1596,15 @@ def handle_query():
         while True:
             response = client.messages.create(**_params)
             _parts.append("".join(b.text for b in response.content if hasattr(b, "text")))
-            if getattr(response, "stop_reason", None) != "max_tokens":
+            _stop = getattr(response, "stop_reason", None)
+            if _stop not in CONTINUABLE_STOPS:
                 _truncated = False
                 break
             _round += 1
-            print(f"  [TRUNCATION] stop_reason=max_tokens, continuation {_round}/{MAX_CONTINUATIONS}")
+            print(f"  [INCOMPLETE] stop_reason={_stop}, continuation {_round}/{MAX_CONTINUATIONS}")
             if _round >= MAX_CONTINUATIONS:
                 break
-            _params = _continuation_params(api_params, "".join(_parts))
+            _params = _continuation_params(api_params, "".join(_parts), _stop)
         _continued_text = "".join(_parts) + (TRUNCATION_MARKER if _truncated else "")
         # Pre-compute fired categories for audit log (Fix C)
         fired_categories = classify_web_intent(user_query) if web_mode else []
@@ -1619,6 +1639,20 @@ def handle_query():
 # ── Truncation handling ─────────────────────────────────────────────────────
 MAX_CONTINUATIONS = int(os.environ.get("MRI_MAX_CONTINUATIONS", "4"))
 
+# With server-side web_search enabled the API can return stop_reason
+# "pause_turn" on a long turn and expects the client to resume. Nothing handled
+# it, so the answer simply stopped - at ~2,900 tokens in the 20 Aug report,
+# nowhere near any max_tokens ceiling.
+CONTINUABLE_STOPS = ("max_tokens", "pause_turn")
+
+PAUSE_INSTRUCTION = (
+    "Continue the report from exactly where you stopped. Do not repeat anything "
+    "already written and do not re-introduce the report. Finish any table you "
+    "were part-way through, then complete the remaining steps, ending with the "
+    "GO / CONDITIONAL GO / NO-GO verdict and the mandatory Data Source / Data "
+    "Period / City / Confidence / Basis footer."
+)
+
 CONTINUE_INSTRUCTION = (
     "Your previous message was cut off because it reached the output limit. "
     "Continue from exactly where you stopped. Do not repeat any content already "
@@ -1637,13 +1671,14 @@ TRUNCATION_MARKER = (
 )
 
 
-def _continuation_params(api_params, text_so_far):
-    """Build the follow-up request that resumes a truncated answer."""
+def _continuation_params(api_params, text_so_far, stop_reason="max_tokens"):
+    """Build the follow-up request that resumes an unfinished answer."""
     p = dict(api_params)
     # the API rejects an assistant turn with trailing whitespace
     p["messages"] = list(api_params["messages"]) + [
         {"role": "assistant", "content": text_so_far.rstrip()},
-        {"role": "user", "content": CONTINUE_INSTRUCTION},
+        {"role": "user", "content": (PAUSE_INSTRUCTION if stop_reason == "pause_turn"
+                                     else CONTINUE_INSTRUCTION)},
     ]
     return p
 
