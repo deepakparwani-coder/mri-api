@@ -85,6 +85,16 @@ class FeasibilityInputs:
     monthly_velocity_pct: Optional[float] = None   # from LF data
     target_margin_pct: float = 15.0
 
+    # ── Phased launch pricing ────────────────────────────────────────────────
+    # Indian developers rarely sell a project at one price. They launch below
+    # the market to build velocity and fund construction, then escalate with
+    # construction milestones and phase releases. `price_psf` is treated as the
+    # TARGET AVERAGE REALISATION (APR); the phase base price is solved so the
+    # unit-weighted average of the ladder equals it exactly.
+    phase_price_factors: Optional[list] = None     # e.g. [0.92, 1.00, 1.08, 1.15]
+    phase_unit_shares: Optional[list] = None       # e.g. [0.25, 0.30, 0.25, 0.20]
+    compressed_years: Optional[int] = None         # sell-out if the discount works
+
     notes: list = field(default_factory=list)
 
     def is_sufficient(self) -> bool:
@@ -369,9 +379,143 @@ def _spread(n: int) -> list:
     return [round(x / s, 6) for x in base]
 
 
+
+# ── Phased launch pricing ────────────────────────────────────────────────────
+def _default_ladder(years: int):
+    """Front-loaded unit release with a modest escalation ladder."""
+    table = {
+        2: ([0.55, 0.45], [0.94, 1.06]),
+        3: ([0.35, 0.35, 0.30], [0.92, 1.04, 1.14]),
+        4: ([0.25, 0.30, 0.25, 0.20], [0.92, 1.00, 1.08, 1.15]),
+        5: ([0.22, 0.26, 0.22, 0.18, 0.12], [0.90, 0.98, 1.06, 1.13, 1.20]),
+    }
+    return table.get(years, table[3])
+
+
+def compute_launch_plan(inp: FeasibilityInputs, base_result: dict) -> dict:
+    """Solve a phased launch ladder whose weighted average equals the target APR,
+    then MEASURE it against flat pricing instead of assuming it is better.
+
+    Holding the average constant, an escalating ladder is NPV-NEGATIVE on pure
+    timing - it moves rupees later. It only pays if the launch discount buys a
+    shorter sell-out. This returns both cases so the report can state the
+    condition rather than assert the conclusion.
+    """
+    years = inp.project_years
+    shares = inp.phase_unit_shares or _default_ladder(years)[0]
+    factors = inp.phase_price_factors or _default_ladder(years)[1]
+    n = min(len(shares), len(factors))
+    shares, factors = shares[:n], factors[:n]
+    tot = sum(shares)
+    shares = [s / tot for s in shares]                 # normalise to exactly 1
+
+    apr = inp.price_psf
+    saleable = base_result["areas"]["saleable_sqft"]
+    units_total = base_result["areas"]["units"]
+
+    # solve base so the unit-weighted average realisation == target APR
+    wavg_factor = sum(s * f for s, f in zip(shares, factors))
+    base_psf = apr / wavg_factor
+    prices = [base_psf * f for f in factors]
+    realised = sum(s * p for s, p in zip(shares, prices))
+
+    phases = []
+    for i, (sh, fac, px) in enumerate(zip(shares, factors, prices), start=1):
+        phases.append(dict(
+            phase=i,
+            label=("Launch" if i == 1 else "Final" if i == n else f"Phase {i}"),
+            unit_share_pct=round(sh * 100, 1),
+            units=round(units_total * sh),
+            price_psf=round(px),
+            vs_apr_pct=round((px / apr - 1) * 100, 1),
+            saleable_sqft=round(saleable * sh),
+            revenue_cr=round(saleable * sh * px / CR, 2),
+        ))
+
+    def _flows(price_list, share_list, yrs):
+        c = base_result["costs"]
+        rev = [saleable * s * p / CR for s, p in zip(share_list, price_list)]
+        fin = (c["construction_cr"] * inp.finance_drawn_pct / 100.0
+               * inp.finance_rate_pct / 100.0 * yrs)
+        other_total = fin + c["professional_cr"] + c["contingency_cr"] + c["marketing_cr"]
+        f = [-(c["land_cr"] + c["approvals_cr"])]
+        carry = 0.0
+        for i in range(yrs):
+            got = rev[i] if i < len(rev) else 0.0
+            coll = got * 0.65 + carry
+            carry = got * 0.35
+            f.append(coll - c["construction_cr"] / yrs - other_total / yrs)
+        f.append(carry)
+        return f, sum(rev), fin
+
+    flat_f, flat_rev, flat_fin = _flows([apr] * years, _spread(years), years)
+    lad_f, lad_rev, lad_fin = _flows(prices, shares, years)
+
+    comp_years = inp.compressed_years or max(2, years - 1)
+    cs, cf_ = _default_ladder(comp_years)
+    cs = [x / sum(cs) for x in cs]
+    cwf = sum(s * f for s, f in zip(cs, cf_))
+    cprices = [apr / cwf * f for f in cf_]
+    comp_f, comp_rev, comp_fin = _flows(cprices, cs, comp_years)
+
+    def _pack(flows, rev, fin, yrs, label):
+        r = irr(flows)
+        return dict(label=label, years=yrs, revenue_cr=round(rev, 2),
+                    finance_cr=round(fin, 2),
+                    irr_pct=round(r * 100, 1) if r is not None else None,
+                    npv15_cr=round(npv(0.15, flows), 2))
+
+    flat = _pack(flat_f, flat_rev, flat_fin, years, f"Flat price at APR, {years}-year sell-out")
+    ladder = _pack(lad_f, lad_rev, lad_fin, years, f"Ladder, same {years}-year sell-out")
+    comp = _pack(comp_f, comp_rev, comp_fin, comp_years,
+                 f"Ladder + discount compresses to {comp_years} years")
+
+    # what the launch discount has to achieve
+    launch_units = phases[0]["units"]
+    months = comp_years * 12 / len(cs)
+    required_velocity = (launch_units / months) / units_total * 100 if units_total and months else None
+
+    # downside: escalation never lands, everything sells near the launch price
+    down_prices = [prices[0]] * n
+    down_f, down_rev, down_fin = _flows(down_prices, shares, years)
+    down_realised = prices[0]
+    c = base_result["costs"]
+    down_cost = _cost_stack(inp, base_result["areas"]["bua_sqft"], down_rev, c["land_cr"])
+    downside = dict(label="Escalation not achieved - all phases near launch price",
+                    realised_psf=round(down_realised),
+                    revenue_cr=round(down_rev, 2),
+                    margin_pct=round((down_rev - down_cost["total_cr"]) / down_rev * 100, 1) if down_rev else None,
+                    npv15_cr=round(npv(0.15, down_f), 2))
+
+    return dict(
+        target_apr_psf=round(apr),
+        solved_base_psf=round(base_psf),
+        realised_average_psf=round(realised, 2),
+        average_matches_target=abs(realised - apr) < 1.0,
+        phases=phases,
+        comparison=[flat, ladder, comp],
+        ladder_vs_flat_npv_cr=round(ladder["npv15_cr"] - flat["npv15_cr"], 2),
+        compressed_vs_flat_npv_cr=round(comp["npv15_cr"] - flat["npv15_cr"], 2),
+        required_launch_velocity_pct=round(required_velocity, 2) if required_velocity else None,
+        market_velocity_pct=inp.monthly_velocity_pct,
+        downside=downside,
+    )
+
+
 # ── Rendering ────────────────────────────────────────────────────────────────
 def _inr(x: float) -> str:
     return f"{x:,.2f}"
+
+
+def compute_with_launch_plan(inp: FeasibilityInputs) -> dict:
+    """compute() plus the phased launch analysis."""
+    r = compute(inp)
+    try:
+        r["launch_plan"] = compute_launch_plan(inp, r)
+    except Exception as e:                     # never let this break the core numbers
+        r["launch_plan"] = None
+        r.setdefault("warnings", []).append(f"launch plan unavailable: {e}")
+    return r
 
 
 def render_markdown(r: dict) -> str:
@@ -451,6 +595,46 @@ def render_markdown(r: dict) -> str:
         L.append("|---|---|---|---|")
         for s in r["absorption"]:
             L.append(f"| {s['scenario']} | {s['velocity_pct']} | {s['units_per_month']} | {s['months_to_sell']} |")
+    lp = r.get("launch_plan")
+    if lp:
+        L.append("")
+        L.append("**Phased launch plan - priced to average out at the target APR**")
+        L.append("")
+        L.append(f"Target average realisation Rs.{lp['target_apr_psf']:,} PSF. Base price solved "
+                 f"to Rs.{lp['solved_base_psf']:,} PSF so the unit-weighted average of the ladder "
+                 f"equals the target exactly (realised Rs.{lp['realised_average_psf']:,.0f}).")
+        L.append("")
+        L.append("| Phase | Units | Share | Price PSF | vs APR | Revenue (Rs.Cr) |")
+        L.append("|---|---|---|---|---|---|")
+        for ph in lp["phases"]:
+            L.append(f"| {ph['label']} | {ph['units']} | {ph['unit_share_pct']}% | "
+                     f"Rs.{ph['price_psf']:,} | {ph['vs_apr_pct']:+}% | {ph['revenue_cr']} |")
+        L.append("")
+        L.append("**Is the ladder actually worth doing?** Holding the average constant, an "
+                 "escalating ladder moves revenue later, so on pure timing it is WORSE than flat "
+                 "pricing. It only pays if the launch discount buys a faster sell-out.")
+        L.append("")
+        L.append("| Strategy | Sell-out | Finance (Rs.Cr) | IRR | NPV @15% (Rs.Cr) |")
+        L.append("|---|---|---|---|---|")
+        for cmp_ in lp["comparison"]:
+            L.append(f"| {cmp_['label']} | {cmp_['years']}y | {cmp_['finance_cr']} | "
+                     f"{cmp_['irr_pct']}% | {cmp_['npv15_cr']} |")
+        L.append("")
+        L.append(f"- Ladder at the SAME sell-out: **{lp['ladder_vs_flat_npv_cr']:+} Cr** NPV vs flat pricing.")
+        L.append(f"- Ladder that compresses the sell-out: **{lp['compressed_vs_flat_npv_cr']:+} Cr** NPV vs flat.")
+        if lp["required_launch_velocity_pct"]:
+            mv = lp["market_velocity_pct"]
+            verdict = ("achievable - below current market velocity" if mv and lp["required_launch_velocity_pct"] < mv
+                       else "demanding - at or above current market velocity" if mv else "no market velocity available to compare")
+            L.append(f"- The launch phase must sell at **{lp['required_launch_velocity_pct']}% per month**"
+                     + (f" against LF market velocity of {mv}% - {verdict}." if mv else "."))
+        d = lp["downside"]
+        L.append(f"- **Downside if the escalation does not land:** realised Rs.{d['realised_psf']:,} PSF, "
+                 f"revenue Rs.{d['revenue_cr']} Cr, margin {d['margin_pct']}%, NPV Rs.{d['npv15_cr']} Cr.")
+        L.append("")
+        L.append("Present the ladder as a pricing STRATEGY with a stated condition, never as "
+                 "predicted appreciation. The escalation is an assumption the developer must "
+                 "earn through velocity, not a forecast.")
     if i["notes"]:
         L.append("")
         L.append("Notes: " + "; ".join(i["notes"]))
@@ -526,6 +710,30 @@ def _self_test() -> int:
     ok = irr([100, 200]) is None
     print(f"  {'PASS' if ok else 'FAIL'}  no-sign-change returns None rather than a number")
     if not ok: fails.append("irr guard")
+
+    print("\n7. phased launch plan")
+    inp.project_years = 4
+    full = compute_with_launch_plan(inp)
+    lp = full["launch_plan"]
+    chk("weighted average == target APR", lp["realised_average_psf"], inp.price_psf, 1.0)
+    ok = lp["average_matches_target"]
+    print(f"  {'PASS' if ok else 'FAIL'}  ladder averages out to the objective price")
+    if not ok: fails.append("ladder average")
+    revs = sum(ph["revenue_cr"] for ph in lp["phases"])
+    chk("phase revenue sums to project revenue", revs, full["revenue_cr"], 0.2)
+    shares = sum(ph["unit_share_pct"] for ph in lp["phases"])
+    chk("unit shares sum to 100%", shares, 100.0, 0.2)
+    ok = lp["ladder_vs_flat_npv_cr"] < 0
+    print(f"  {'PASS' if ok else 'FAIL'}  ladder at same duration is NPV-negative "
+          f"({lp['ladder_vs_flat_npv_cr']:+} Cr) - the honest result, not the flattering one")
+    if not ok: fails.append("ladder timing effect")
+    ok = lp["downside"]["margin_pct"] < full["margin_on_revenue_pct"]
+    print(f"  {'PASS' if ok else 'FAIL'}  downside case is worse than base "
+          f"({lp['downside']['margin_pct']}% vs {full['margin_on_revenue_pct']}%)")
+    if not ok: fails.append("downside case")
+    ok = lp["phases"][0]["price_psf"] < lp["phases"][-1]["price_psf"]
+    print(f"  {'PASS' if ok else 'FAIL'}  launch price below final phase price")
+    if not ok: fails.append("ladder direction")
 
     print(f"\n{'ALL CHECKS PASSED' if not fails else 'FAILURES: ' + ', '.join(fails)}")
     return 1 if fails else 0

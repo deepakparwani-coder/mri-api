@@ -1694,8 +1694,8 @@ def _continuation_params(api_params, text_so_far, stop_reason="max_tokens"):
 
 # ── Deterministic feasibility ───────────────────────────────────────────────
 try:
-    from feasibility import parse_feasibility_inputs, compute as _feas_compute, \
-        render_markdown as _feas_render
+    from feasibility import parse_feasibility_inputs, \
+        compute_with_launch_plan as _feas_compute, render_markdown as _feas_render
     _FEAS_OK = True
 except Exception as _e:            # module missing -> behave exactly as before
     print(f"  [FEAS] calculator unavailable ({_e}); falling back to prose maths")
@@ -1703,9 +1703,15 @@ except Exception as _e:            # module missing -> behave exactly as before
 
 
 def _lf_price_and_velocity(data_results):
-    """Pull the latest wt-avg saleable price and monthly velocity out of the
-    LF rows already fetched, so the calculator uses knowledge-base figures."""
-    price = velocity = None
+    """Pull price and monthly velocity out of the LF rows already fetched.
+
+    Preference order matters. ABSORPTION price is what units actually transact
+    at; weighted-average-on-marketable-supply is the asking price and runs
+    higher (Hinjewadi Q1 26-27: absorption 8,455 vs asking 8,571). Revenue
+    projection uses the transacted figure - the more conservative and the more
+    defensible of the two.
+    """
+    absorption = wt_avg = velocity = None
     for r in data_results or []:
         rows = r.get("data") or r.get("rows") or []
         if not isinstance(rows, list):
@@ -1721,13 +1727,16 @@ def _lf_price_and_velocity(data_results):
                     fv = float(v)
                 except (TypeError, ValueError):
                     continue
-                if price is None and ("wt_avg" in lk or "price_psf" in lk
-                                      or lk in ("price", "wt_avg_price", "saleable_price")):
-                    if 1000 < fv < 100000:
-                        price = fv
+                if 1000 < fv < 100000:
+                    if absorption is None and "absorption" in lk:
+                        absorption = fv
+                    elif wt_avg is None and ("wt_avg" in lk or "price_psf" in lk
+                                             or lk in ("price", "wt_avg_price", "saleable_price")):
+                        wt_avg = fv
                 if velocity is None and "velocit" in lk and 0 < fv < 50:
                     velocity = fv
-    return price, velocity
+    return (absorption or wt_avg), velocity, ("absorption" if absorption else
+                                              "weighted average (asking)" if wt_avg else None)
 
 
 def build_feasibility_block(user_query, data_results):
@@ -1741,17 +1750,18 @@ def build_feasibility_block(user_query, data_results):
     if inp is None:
         return None, "not a feasibility query"
 
-    lf_price, lf_vel = _lf_price_and_velocity(data_results)
+    lf_price, lf_vel, lf_basis = _lf_price_and_velocity(data_results)
     if inp.price_psf is None and lf_price:
         inp.price_psf = lf_price
-        inp.price_psf_source = "LF knowledge base (latest quarter)"
+        inp.price_psf_source = f"LF knowledge base, {lf_basis} price, latest quarter"
     if inp.monthly_velocity_pct is None and lf_vel:
         inp.monthly_velocity_pct = lf_vel
 
     if not inp.is_sufficient() or inp.price_psf is None:
         return None, "insufficient inputs: " + ", ".join(inp.missing())
     try:
-        return _feas_render(_feas_compute(inp)), "computed"
+        from feasibility import compute_with_launch_plan as _feas_full
+        return _feas_render(_feas_full(inp)), "computed"
     except Exception as e:
         return None, f"compute error: {e}"
 
