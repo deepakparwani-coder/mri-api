@@ -639,6 +639,19 @@ function rcharts(bub) {
 
 
 // ── PDF ── Professional Report Generator with jsPDF-AutoTable
+// Split a markdown table row into cells WITHOUT discarding empty ones.
+// The exporter used .filter(c => c.trim() !== ""), so "| TOTAL | | | | 60/80 |"
+// collapsed from five columns to two and every value landed under the wrong
+// heading. Only the empties created by the outer pipes should be dropped.
+function _pdfCells(tr) {
+  var p = String(tr).split("|");
+  if (p.length && p[0].trim() === "") p.shift();
+  if (p.length && p[p.length - 1].trim() === "") p.pop();
+  return p.map(function(c) {
+    return c.trim().replace(/\*\*/g, "").replace(/\u20B9/g, "Rs.");
+  });
+}
+
 function xpdf() {
   if (!hist.length) { alert("No conversation to export."); return; }
   // Guard must test the PLUGIN too, not just jsPDF - otherwise a present
@@ -764,6 +777,10 @@ function xpdf() {
     var content = (msg.content || "").replace(/<lfchart[^>]*>[\s\S]*?<\/lfchart>/g, "\n[CHART]\n");
     var lines = content.split("\n");
     var inTable = false, tableRows = [], tableHeaders = [];
+    // _tableLeadPipe: this table is written as |a|b|c| rather than a | b | c
+    // _lastRowShort : the row above has fewer cells than the header, so the
+    //                 next non-row line is its wrapped tail, not prose.
+    var _tableLeadPipe = false, _lastRowShort = false;
 
     function flushTable() {
       if (!tableHeaders.length || !tableRows.length) { inTable=false; tableHeaders=[]; tableRows=[]; return; }
@@ -824,19 +841,57 @@ function xpdf() {
         return;
       }
 
-      // TABLE ROW — detect both |col|col| and col | col | col formats
+      // TABLE ROW — detect both |col|col| and col | col | col formats.
+      //
+      // The old guard also carried `tr.indexOf("[Web") < 0`, which excluded
+      // every row citing web context from being a table row. Scorecard rows 2,
+      // 3 and 6 - the ones with [Web Context] - therefore printed as raw
+      // markdown in the PDF. The `tr.indexOf("](") < 0` test on this same line
+      // already blocks markdown links, which is what that check was for.
       var pipeCount = (tr.match(/\|/g)||[]).length;
+
+      // CONTINUATION OF A WRAPPED ROW — must be tested BEFORE the row branch,
+      // because the tail of a wrapped row contains pipes of its own and would
+      // otherwise be taken for a new row ("by mid-2026 ... | 7/10 |" became its
+      // own line with the score in the wrong column).
+      // Three conditions keep this tight: the table is pipe-delimited, the row
+      // above is genuinely short of the header, and this line does not start a
+      // new row. Tables written as "col | col | col" never trigger it.
+      if (inTable && _tableLeadPipe && _lastRowShort && tableRows.length
+          && tr.charAt(0) !== "|" && !/^[\|\s\-:]+$/.test(tr)) {
+        var _last = tableRows[tableRows.length - 1];
+        while (_last.length && _last[_last.length - 1] === "") _last.pop();
+        var _joined = _pdfCells(_last.join(" | ") + " " + tr);
+        var _hw = tableHeaders.length;
+        _lastRowShort = _joined.length < _hw;
+        while (_joined.length < _hw) _joined.push("");
+        if (_joined.length > _hw) _joined = _joined.slice(0, _hw - 1).concat([_joined.slice(_hw - 1).join(" ")]);
+        tableRows[tableRows.length - 1] = _joined;
+        return;
+      }
+
       var isTableRow = false;
       var cells = [];
-      if (pipeCount >= 2 && !tr.match(/^http/) && tr.indexOf("](")<0 && tr.indexOf("[Web")<0) {
+      if (pipeCount >= 2 && !tr.match(/^http/) && tr.indexOf("](")<0) {
         // Skip separator rows
         if (/^[\|\s\-:]+$/.test(tr)) return;
-        cells = tr.split("|").filter(function(c){return c.trim()!=="";}).map(function(c){return c.trim().replace(/\*\*/g,"").replace(/\u20B9/g,"Rs.");});
+        cells = _pdfCells(tr);
         if (cells.length >= 2) isTableRow = true;
       }
       if (isTableRow) {
-        if (!inTable) { inTable=true; tableHeaders=cells; tableRows=[]; }
-        else { tableRows.push(cells); }
+        if (!inTable) {
+          inTable = true; tableHeaders = cells; tableRows = [];
+          _tableLeadPipe = (tr.charAt(0) === "|");
+          _lastRowShort = false;
+        } else {
+          // Square every row to the header. Without this one malformed row
+          // re-columns everything below it, silently, under wrong headings.
+          var w = tableHeaders.length;
+          _lastRowShort = cells.length < w;
+          while (cells.length < w) cells.push("");
+          if (cells.length > w) cells = cells.slice(0, w - 1).concat([cells.slice(w - 1).join(" ")]);
+          tableRows.push(cells);
+        }
         return;
       }
 
@@ -1191,29 +1246,59 @@ function validateResponse(fullText, chartObjects) {
   return allWarnings;
 }
 
-// One report printed scorecard parameters 1,2,3,4,6,7,8 - no 5 - and totalled
-// 62/80 while the visible rows summed to 56. The missing row was counted but
-// never shown, so the reader could not audit the score. Recompute from what is
-// actually on the page and say so when it disagrees.
+// A site score appears in at least three places: the Step 0 verdict, the
+// scorecard total, and the final verdict. They have to agree with each other AND
+// with the rows on the page.
+//
+// Two real failures this exists to catch:
+//   62/80 claimed while the 7 rows shown summed to 56 (a row was never printed)
+//   65/80 in Step 0, 60/80 in the table and in the final verdict
+// The first version of this check compared only the total against the rows, so
+// it was silent on the second case.
 function validateScorecard(text) {
   var w = [];
   if (!text) return w;
-  var start = text.search(/SCORECARD/i);
+  var start = text.search(/SCORECARD|SITE\s+SCORE/i);
   if (start < 0) return w;
-  var m = /TOTAL[^\n]{0,40}?(\d{1,3})\s*\/\s*80/i.exec(text.slice(start));
-  if (!m) return w;
-  var claimed = parseInt(m[1], 10);
-  var seg = text.slice(start, start + m.index);
+
+  // 1. every score out of 80, wherever it appears
+  var totals = [], tm, tre = /(\d{1,3})\s*\/\s*80\b/g;
+  while ((tm = tre.exec(text)) !== null) totals.push(parseInt(tm[1], 10));
+  if (!totals.length) return w;
+  var distinct = totals.filter(function(v, i, a) { return a.indexOf(v) === i; });
+  if (distinct.length > 1) {
+    w.push("The site score is stated as " + distinct.join("/80 and ") +
+           "/80 in different sections - these cannot all be right.");
+  }
+
+  // 2. the rows actually shown
+  var firstTotalAt = text.search(/(?:TOTAL|Site\s+Score)[^\n]{0,60}?\d{1,3}\s*\/\s*80/i);
+  var seg = firstTotalAt > start ? text.slice(start, firstTotalAt) : text.slice(start);
   var scores = (seg.match(/\b\d{1,2}\s*\/\s*10\b/g) || [])
     .map(function(s) { return parseInt(s, 10); });
-  if (!scores.length) return w;
-  var sum = scores.reduce(function(a, b) { return a + b; }, 0);
-  if (sum !== claimed) {
-    w.push("Scorecard total " + claimed + "/80 does not match the " + scores.length +
-           " rows shown, which sum to " + sum + " - a parameter is missing from the table.");
+  if (scores.length) {
+    var sum = scores.reduce(function(a, b) { return a + b; }, 0);
+    var claimed = totals[totals.length - 1];      // the scorecard's own total
+    if (scores.indexOf(sum) === -1 && totals.indexOf(sum) === -1) {
+      w.push("Scorecard rows sum to " + sum + "/80 but the report states " +
+             claimed + "/80 - a parameter is missing or the total is estimated.");
+    }
+    if (scores.length !== 8) {
+      w.push("Scorecard shows " + scores.length + " of 8 parameters.");
+    }
   }
-  if (scores.length !== 8) {
-    w.push("Scorecard shows " + scores.length + " of 8 parameters.");
+
+  // 3. the band word must follow the number, not the mood
+  var band = function(n) {
+    return n >= 70 ? "STRONG" : n >= 55 ? "MODERATE" : n >= 40 ? "WEAK" : "POOR";
+  };
+  var bm = /(\d{1,3})\s*\/\s*80\s*[-\u2013\u2014:]?\s*(STRONG|MODERATE|WEAK|POOR)/i.exec(text);
+  if (bm) {
+    var n = parseInt(bm[1], 10), said = bm[2].toUpperCase(), should = band(n);
+    if (said !== should) {
+      w.push("A score of " + n + "/80 is " + should + " on the fixed band table, " +
+             "but the report calls it " + said + ".");
+    }
   }
   return w;
 }

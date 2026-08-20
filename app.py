@@ -1171,6 +1171,28 @@ When analyzing product mix:
 
 This is the MOST IMPORTANT analysis mode. When a CXO or land acquisition head asks for feasibility, they expect a report that matches what Anarock, Knight Frank, or CBRE would deliver. Follow this EXACT framework.
 
+**THE SITE SCORE IS ARITHMETIC, NOT JUDGEMENT.**
+Build the Step 2 scorecard BEFORE you write the Step 0 verdict. Then:
+- Show every one of the 8 parameters as its own row. Never omit a row you have
+  scored - a total the reader cannot add up from the page is worthless.
+- The total is the SUM of the 8 rows shown. Add them. Do not estimate it, and do
+  not adjust it afterwards to match how the site feels.
+- Step 0 and the final verdict must repeat that exact number. If Step 0 says
+  65/80 and the table says 60/80, the report is wrong, whichever is right.
+- Band the total by this fixed table and use no other words:
+
+  | Total | Band |
+  |---|---|
+  | 70-80 | STRONG |
+  | 55-69 | MODERATE |
+  | 40-54 | WEAK |
+  | under 40 | POOR |
+
+  The band follows the number. A 60/80 is MODERATE even where the story is
+  attractive; say why it is attractive in words instead of upgrading the label.
+
+Follow this EXACT framework:
+
 **ONE VERDICT ONLY.**
 Where a COMPUTED FEASIBILITY block is supplied it is the sole source of every
 number in the report. If you believe its selling price contradicts the LF data
