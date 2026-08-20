@@ -1161,21 +1161,7 @@ When analyzing product mix:
 
 **LAND FEASIBILITY (COMPREHENSIVE — Use when user provides plot details, FSI, Google Maps link, or asks about feasibility):**
 
-This is the MOST IMPORTANT analysis mode. When a CXO or land acquisition head asks for feasibility, they expect a report that matches what Anarock, Knight Frank, or CBRE would deliver. Follow this EXACT framework.
-
-**LENGTH DISCIPLINE (the server has a hard time limit).**
-The full report must be generated in under 100 seconds or the connection is cut
-mid-sentence and the reader gets nothing after that point. Therefore:
-- Lead with STEP 0, the verdict. If only one thing survives, it must be that.
-- Prefer tables to prose. Do not restate a number in a sentence that already
-  appears in a table.
-- Where a COMPUTED FEASIBILITY block is supplied, quote its figures directly.
-  Never re-derive or re-explain the arithmetic - it is already correct.
-- Keep each step to its essentials. Depth is available on request: end with one
-  line offering the sections the reader can ask for in detail.
-- Do not pad with generic market commentary the reader did not ask for.
-
-Follow this EXACT framework:
+This is the MOST IMPORTANT analysis mode. When a CXO or land acquisition head asks for feasibility, they expect a report that matches what Anarock, Knight Frank, or CBRE would deliver. Follow this EXACT framework:
 
 **STEP 0 - EXECUTIVE VERDICT (WRITE THIS FIRST, BEFORE ANYTHING ELSE)**
 
@@ -1529,11 +1515,7 @@ def handle_query():
 
     # Add web search tool if needed — limit uses to prevent timeout
     if web_mode:
-        # Each server-side search costs several seconds of a ~100s budget.
-        # Measured throughput is ~29 tok/s; 5 searches can consume half the
-        # time available and the report never reaches its verdict.
-        web_uses = int(os.environ.get("MRI_WEB_USES_FEASIBILITY", "2")) \
-            if is_feasibility else int(os.environ.get("MRI_WEB_USES", "2"))
+        web_uses = 5 if is_feasibility else 3
         api_params["tools"] = [
             {"type": "web_search_20250305", "name": "web_search", "max_uses": web_uses}
         ]
@@ -1545,9 +1527,9 @@ def handle_query():
 
         def generate():
             try:
-                _t0 = _time.time()
-                # Loop so a max_tokens/pause_turn stop resumes instead of ending
-                # the report mid-sentence - but only while there is time left.
+                # Loop so a max_tokens stop resumes instead of ending the report
+                # mid-sentence. Text streams to the client as it arrives; the
+                # continuation simply keeps the same stream going.
                 _params = api_params
                 _full = ""
                 _round = 0
@@ -1586,22 +1568,14 @@ def handle_query():
                         _truncated = False
                         break
                     _round += 1
-                    _left = _budget_left(_t0)
-                    print(f"  [INCOMPLETE] stop_reason={_stop}, continuation {_round}/{MAX_CONTINUATIONS}, "
-                          f"{_left:.0f}s of budget left")
-                    # A continuation costs at least one more round trip. Starting
-                    # one with no budget guarantees the gateway severs it mid-word.
-                    if _round >= MAX_CONTINUATIONS or _left < 25:
-                        if _left < 25:
-                            print("  [DEADLINE] not enough time to continue - closing cleanly")
+                    print(f"  [INCOMPLETE] stop_reason={_stop}, continuation {_round}/{MAX_CONTINUATIONS}")
+                    if _round >= MAX_CONTINUATIONS:
                         break
                     _params = _continuation_params(api_params, _full, _stop)
 
                 if _truncated:
-                    _left = _budget_left(_t0)
-                    _mark = DEADLINE_MARKER if _left < 25 else TRUNCATION_MARKER
-                    print(f"  [INCOMPLETE] unfinished; {_left:.0f}s budget left - marking")
-                    yield f"data: {json.dumps({'type': 'text', 'text': _mark})}\n\n"
+                    print("  [INCOMPLETE] still unfinished after continuations - marking")
+                    yield f"data: {json.dumps({'type': 'text', 'text': TRUNCATION_MARKER})}\n\n"
 
                 done_meta = {
                     'type': 'done',
@@ -1790,27 +1764,6 @@ def build_feasibility_block(user_query, data_results):
         return _feas_render(_feas_full(inp)), "computed"
     except Exception as e:
         return None, f"compute error: {e}"
-
-
-# ── Generation deadline ─────────────────────────────────────────────────────
-# Render (and most PaaS gateways) terminate a request at ~120s. Measured:
-# both streaming and non-streaming calls died at exactly 121.3s. Generation
-# must therefore finish inside a budget, and finish CLEANLY when it cannot.
-import time as _time
-
-GEN_BUDGET_SECS = float(os.environ.get("MRI_GEN_BUDGET_SECS", "100"))
-
-DEADLINE_MARKER = (
-    "\n\n---\n\n**REPORT TRUNCATED - TIME LIMIT**\n\n"
-    "Generation reached the server's time budget before the report finished. "
-    "The verdict and economics above are complete and computed; the remaining "
-    "sections were not written. Ask for any specific section as a follow-up "
-    "question and it will be produced on its own.\n"
-)
-
-
-def _budget_left(t0):
-    return GEN_BUDGET_SECS - (_time.time() - t0)
 
 
 @app.route('/api/raw', methods=['POST'])
