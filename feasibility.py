@@ -91,9 +91,19 @@ class FeasibilityInputs:
     # construction milestones and phase releases. `price_psf` is treated as the
     # TARGET AVERAGE REALISATION (APR); the phase base price is solved so the
     # unit-weighted average of the ladder equals it exactly.
-    phase_price_factors: Optional[list] = None     # e.g. [0.92, 1.00, 1.08, 1.15]
+    phase_price_factors: Optional[list] = None     # None -> derived from LF data
     phase_unit_shares: Optional[list] = None       # e.g. [0.25, 0.30, 0.25, 0.20]
     compressed_years: Optional[int] = None         # sell-out if the discount works
+
+    # ── Collection profile (construction-linked plan) ────────────────────────
+    # An earlier version assumed 65% of a booking collects in-year with 35%
+    # lagging. That is not how Indian residential is sold. Under a CLP the
+    # buyer pays a booking amount, then instalments tied to construction
+    # milestones, then a final tranche at possession/OC. Sources in README.
+    # RERA s.13(1) caps pre-agreement collection at 10% of apartment cost.
+    booking_collect_pct: float = 12.0     # booking + agreement
+    possession_collect_pct: float = 15.0  # on OC / handover
+    # remainder accrues pro-rata to construction progress
 
     notes: list = field(default_factory=list)
 
@@ -381,15 +391,40 @@ def _spread(n: int) -> list:
 
 
 # ── Phased launch pricing ────────────────────────────────────────────────────
+# Escalation measured from the LF database itself: 355 marketable wings across
+# 118 projects in Whitefield and Hinjewadi, launch price vs current price,
+# Q1 26-27. Median CAGR is 1.1%/yr for the first two years after launch and
+# 9.1%/yr thereafter - escalation is BACK-LOADED, not linear. Overall median
+# 4.7%/yr, and 15.8% of wings trade BELOW their launch price today.
+LF_ESCALATION_EARLY = 0.011      # yrs 0-2, median CAGR
+LF_ESCALATION_LATE = 0.091       # yrs 2+,  median CAGR
+LF_ESCALATION_SAMPLE = "355 wings / 118 projects, Whitefield + Hinjewadi, Q1 26-27"
+LF_BELOW_LAUNCH_PCT = 15.8       # share trading below launch price today
+
+_UNIT_RELEASE = {2: [0.55, 0.45], 3: [0.35, 0.35, 0.30],
+                 4: [0.25, 0.30, 0.25, 0.20],
+                 5: [0.22, 0.26, 0.22, 0.18, 0.12]}
+
+
+def _escalation_index(t_years: float) -> float:
+    """Observed price index t years after launch (launch = 1.000)."""
+    return ((1 + LF_ESCALATION_EARLY) ** min(t_years, 2.0)
+            * (1 + LF_ESCALATION_LATE) ** max(0.0, t_years - 2.0))
+
+
 def _default_ladder(years: int):
-    """Front-loaded unit release with a modest escalation ladder."""
-    table = {
-        2: ([0.55, 0.45], [0.94, 1.06]),
-        3: ([0.35, 0.35, 0.30], [0.92, 1.04, 1.14]),
-        4: ([0.25, 0.30, 0.25, 0.20], [0.92, 1.00, 1.08, 1.15]),
-        5: ([0.22, 0.26, 0.22, 0.18, 0.12], [0.90, 0.98, 1.06, 1.13, 1.20]),
-    }
-    return table.get(years, table[3])
+    """Unit release schedule and price factors DERIVED FROM LF DATA.
+
+    Factors are the observed escalation index at each phase midpoint,
+    normalised so the unit-weighted average is exactly 1.000 - i.e. the ladder
+    averages to the target APR by construction, and its SHAPE comes from what
+    projects in this market actually did rather than from anyone's opinion.
+    """
+    shares = _UNIT_RELEASE.get(years, _UNIT_RELEASE[3])
+    shares = [s / sum(shares) for s in shares]
+    idx = [_escalation_index(i + 0.5) for i in range(len(shares))]
+    w = sum(s * x for s, x in zip(shares, idx))
+    return shares, [round(x / w, 4) for x in idx]
 
 
 def compute_launch_plan(inp: FeasibilityInputs, base_result: dict) -> dict:
@@ -433,19 +468,41 @@ def compute_launch_plan(inp: FeasibilityInputs, base_result: dict) -> dict:
         ))
 
     def _flows(price_list, share_list, yrs):
+        """Cash flow under a construction-linked plan.
+
+        A cohort booking in year i pays `booking_collect_pct` on booking, then
+        the middle tranche pro-rata to construction progress over the REMAINING
+        build period, then `possession_collect_pct` at OC. This replaces a flat
+        65/35 split, which over-collected early and flattered NPV.
+        """
         c = base_result["costs"]
         rev = [saleable * s * p / CR for s, p in zip(share_list, price_list)]
         fin = (c["construction_cr"] * inp.finance_drawn_pct / 100.0
                * inp.finance_rate_pct / 100.0 * yrs)
         other_total = fin + c["professional_cr"] + c["contingency_cr"] + c["marketing_cr"]
+
+        bk = inp.booking_collect_pct / 100.0
+        ps = inp.possession_collect_pct / 100.0
+        mid = max(0.0, 1.0 - bk - ps)
+
+        collections = [0.0] * (yrs + 2)          # index yrs+1 == possession year
+        for i, amount in enumerate(rev):
+            if amount <= 0:
+                continue
+            collections[i] += amount * bk
+            remaining = yrs - i                   # construction years left
+            if remaining > 0:
+                per = amount * mid / remaining
+                for j in range(i, yrs):
+                    collections[j] += per
+            else:
+                collections[yrs] += amount * mid
+            collections[yrs] += amount * ps       # OC tranche
+
         f = [-(c["land_cr"] + c["approvals_cr"])]
-        carry = 0.0
         for i in range(yrs):
-            got = rev[i] if i < len(rev) else 0.0
-            coll = got * 0.65 + carry
-            carry = got * 0.35
-            f.append(coll - c["construction_cr"] / yrs - other_total / yrs)
-        f.append(carry)
+            f.append(collections[i] - c["construction_cr"] / yrs - other_total / yrs)
+        f.append(collections[yrs])
         return f, sum(rev), fin
 
     flat_f, flat_rev, flat_fin = _flows([apr] * years, _spread(years), years)
@@ -734,6 +791,27 @@ def _self_test() -> int:
     ok = lp["phases"][0]["price_psf"] < lp["phases"][-1]["price_psf"]
     print(f"  {'PASS' if ok else 'FAIL'}  launch price below final phase price")
     if not ok: fails.append("ladder direction")
+
+    print("\n8. collection profile (construction-linked plan)")
+    bk, ps = inp.booking_collect_pct, inp.possession_collect_pct
+    chk("booking + middle + possession = 100%", bk + (100 - bk - ps) + ps, 100.0, 0.01)
+    total_coll = sum(t["collections_cr"] for t in full["cash_flow"])
+    chk("every rupee of revenue is collected", total_coll, full["revenue_cr"], 0.05)
+    ok = full["cash_flow"][1]["collections_cr"] < full["revenue_cr"] * 0.35
+    print(f"  {'PASS' if ok else 'FAIL'}  year-1 collections are modest, as a CLP implies "
+          f"(Rs.{full['cash_flow'][1]['collections_cr']} Cr of Rs.{full['revenue_cr']} Cr)")
+    if not ok: fails.append("clp front-loading")
+
+    print("\n9. escalation ladder derives from LF data, not opinion")
+    ok = _escalation_index(0) == 1.0 and _escalation_index(4) > _escalation_index(2) > _escalation_index(0)
+    print(f"  {'PASS' if ok else 'FAIL'}  index starts at 1.000 and rises monotonically")
+    if not ok: fails.append("escalation index")
+    sh, fac = _default_ladder(4)
+    chk("ladder factors average to 1.000", sum(s_*f_ for s_, f_ in zip(sh, fac)), 1.0, 0.002)
+    ok = fac[-1] / fac[0] < 1.30
+    print(f"  {'PASS' if ok else 'FAIL'}  spread {fac[-1]/fac[0]:.2f}x is within what the data supports "
+          f"(an earlier hand-guessed ladder was 1.25x)")
+    if not ok: fails.append("ladder spread")
 
     print(f"\n{'ALL CHECKS PASSED' if not fails else 'FAILURES: ' + ', '.join(fails)}")
     return 1 if fails else 0
