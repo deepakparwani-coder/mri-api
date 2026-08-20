@@ -472,6 +472,20 @@ def extract_project_name(query):
     return None
 
 
+# Saleable-basis queries and their carpet-basis equivalents. Carpet PSF is not
+# a conversion of saleable PSF - it is its own measured series in the LF data.
+_CARPET_TWIN = {
+    "price_trend_saleable": "price_trend_carpet",
+    "unit_size_saleable": "unit_size_carpet",
+    "price_range_saleable": "price_range_carpet",
+}
+
+
+def _wants_carpet_basis(q):
+    """True when the question is about carpet / RERA-basis area or pricing."""
+    return bool(re.search(r"\bcarpet\b|rera[\s-]*(?:basis|carpet|area)", q))
+
+
 def classify_intent(query, city):
     """Map user query to appropriate Cypher queries.
     v3: 35+ regex patterns covering all KB sections + robust project name extraction.
@@ -692,6 +706,28 @@ def classify_intent(query, city):
     # ── Micromarket list / sub-regions / areas ──
     if re.search(r'micro.*market|sub.*region|area.*within|region.*within|localities|zones|which.*areas', q):
         results.append(run_query("micromarket_list", city=city))
+
+    # ── Carpet / RERA basis ────────────────────────────────────────────────
+    # The carpet series (CARPET_PRICE_AT) and the carpet rate/size bands are in
+    # the graph, but nothing here ever asked for them: seven branches above fire
+    # price_trend_saleable and none fire its carpet twin. A model handed only
+    # saleable columns correctly reports "no carpet column" - and then fills the
+    # gap with an industry ratio. The data was never the problem; the routing was.
+    if _wants_carpet_basis(q):
+        merged = []
+        have = {r.get("query") for r in results}
+        for r in results:
+            merged.append(r)
+            alt = _CARPET_TWIN.get(r.get("query"))
+            if alt and alt not in have:
+                # Inserted NEXT TO its saleable twin, not appended, so the
+                # safety cap below cannot silently drop the basis the user
+                # actually asked for.
+                merged.append(run_query(alt, city=city))
+                have.add(alt)
+        results = merged
+        if not (have & set(_CARPET_TWIN.values())):
+            results.insert(0, run_query("price_trend_carpet", city=city))
 
     # ═══ Safety cap to keep Anthropic call within timeout. 12 was chosen
     # because a corridor + demographic combo can fire up to 12 queries
@@ -1171,6 +1207,30 @@ When analyzing product mix:
 
 This is the MOST IMPORTANT analysis mode. When a CXO or land acquisition head asks for feasibility, they expect a report that matches what Anarock, Knight Frank, or CBRE would deliver. Follow this EXACT framework.
 
+**AREA BASIS: NEVER CONVERT A PRICE.**
+Saleable PSF and carpet PSF are two separate measured series in the LF data.
+Carpet PSF is NOT saleable PSF divided by a ratio, and you must never produce
+one from the other.
+- If the user asks for carpet-basis pricing, use the carpet series
+  (price_trend_carpet / price_range_carpet / unit_size_carpet). Its columns are
+  already in Rs. per carpet sqft - do not adjust them.
+- If no carpet rows were retrieved, say exactly that: "carpet pricing was not
+  retrieved for this query". Do NOT say it is absent from the dataset - you
+  cannot see the dataset, only what was handed to you - and do NOT estimate it.
+- The 0.74 RERA ratio may be used to size AREA in a feasibility appraisal, where
+  it is declared as an assumption. It may never be used to state a PRICE.
+
+**LABEL EVERY DERIVED NUMBER WHERE IT APPEARS.**
+Any figure not read directly from the LF data block is marked inline - in the
+same cell or sentence, not in a footnote:
+  Rs.11,412 PSF (DERIVED: saleable Rs.8,455 / 0.74 assumed carpet ratio;
+  actual ratio varies 0.68-0.78 by project)
+A derived number sitting unmarked in a table of LF figures is the single worst
+thing this system can produce. The reader cannot tell which is which, so they
+distrust all of it.
+
+Follow this EXACT framework:
+
 **THE SITE SCORE IS ARITHMETIC, NOT JUDGEMENT.**
 Build the Step 2 scorecard BEFORE you write the Step 0 verdict. Then:
 - Show every one of the 8 parameters as its own row. Never omit a row you have
@@ -1313,7 +1373,8 @@ A. BUILDABLE AREA CALCULATION (always compute — needs only plot area + FSI):
    - Net Plot Area = Gross × 85% (road surrender, setbacks, amenity space)
    - Total BUA = Net Plot × FSI
    - Saleable Area = BUA × Efficiency (70% freehold residential, 55% SRA, 65% MHADA, 75% commercial)
-   - Carpet Area = Saleable × 0.74 (RERA carpet ratio)
+   - Carpet Area = Saleable x 0.74 (RERA carpet ratio - an ASSUMPTION for
+     sizing only, never for pricing; label it as such wherever it is used)
 
 B. REVENUE PROJECTION (use LF price data from the micromarket):
    - Identify weighted avg saleable price PSF from LF data for this micromarket
