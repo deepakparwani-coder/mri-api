@@ -70,8 +70,16 @@ RATE_LIMIT_MAX = 15     # max requests per window per IP
 _rate_store = defaultdict(list)
 
 
+# The async worker re-enters handle_query() through a synthetic request whose
+# remote_addr is this sentinel. The real caller was already rate-limited when it
+# submitted the job; counting it twice would throttle every second report.
+INTERNAL_IP = "__mri_internal__"
+
+
 def check_rate_limit(ip):
     """Return True if allowed, False if rate limited."""
+    if ip == INTERNAL_IP:
+        return True
     now = time.time()
     # Clean old entries
     _rate_store[ip] = [t for t in _rate_store[ip] if now - t < RATE_LIMIT_WINDOW]
@@ -1552,12 +1560,21 @@ def handle_query():
                 _full = ""
                 _round = 0
                 _truncated = True
+                _deadline_hit = False
                 while True:
                     _chunk = ""
                     with client.messages.stream(**_params) as s:
                         # Iterate raw events so we can capture both text chunks
                         # AND server_tool_use (web_search) invocations for audit.
                         for event in s:
+                            # THE CLOCK BELONGS HERE. Checking it only between
+                            # continuations meant one long call could run past
+                            # the gateway limit untouched - which is exactly
+                            # what was happening: ~300s of generation against a
+                            # ~120s cap, severed mid-word, no marker, every time.
+                            if _budget_left(_t0) <= 0:
+                                _deadline_hit = True
+                                break
                             et = getattr(event, "type", None)
                             if et == "content_block_delta":
                                 delta = getattr(event, "delta", None)
@@ -1579,8 +1596,16 @@ def handle_query():
                                         f"categories={fired_categories} "
                                         f"claude_searched={search_query!r}"
                                     )
-                        _final = s.get_final_message()
+                        if not _deadline_hit:
+                            _final = s.get_final_message()
                     _full += _chunk
+                    if _deadline_hit:
+                        # Stop cleanly on our own terms rather than waiting to be
+                        # cut. _truncated stays True so a marker is appended and
+                        # the 'done' event still reaches the client.
+                        print(f"  [DEADLINE] {_budget_secs():.0f}s budget spent mid-generation "
+                              f"after {len(_full):,} chars - closing cleanly")
+                        break
                     _stop = getattr(_final, "stop_reason", None)
                     if _stop not in CONTINUABLE_STOPS:
                         _truncated = False
@@ -1809,8 +1834,176 @@ DEADLINE_MARKER = (
 )
 
 
+import threading as _threading
+
+# A request served on the HTTP path has ~120s before the gateway cuts it. A
+# request served by the async worker has no gateway in front of it at all, so
+# it gets a much larger budget. Same code, different ceiling, chosen per thread.
+_BUDGET = _threading.local()
+
+
+def _budget_secs():
+    return getattr(_BUDGET, "value", None) or GEN_BUDGET_SECS
+
+
 def _budget_left(t0):
-    return GEN_BUDGET_SECS - (_time.time() - t0)
+    return _budget_secs() - (_time.time() - t0)
+
+
+# ── Asynchronous generation ────────────────────────────────────────────────
+# Reports need ~300s; the platform gateway allows ~120s. Rather than keep
+# shrinking the report to fit a limit it will never reliably fit, generation
+# moves off the request path: submit a job, poll for the result. Each poll is a
+# sub-second request, so no single call goes anywhere near the gateway limit.
+#
+# The worker does NOT reimplement the pipeline. It re-enters handle_query()
+# through a synthetic request context and consumes the SSE generator that
+# function already returns, so Neo4j retrieval, pin resolution, the feasibility
+# engine and the prompt are byte-for-byte the ones the sync path uses.
+import uuid as _uuid
+
+_JOBS = {}
+_JOBS_LOCK = _threading.Lock()
+JOB_TTL_SECS = float(os.environ.get("MRI_JOB_TTL_SECS", "1800"))
+ASYNC_BUDGET_SECS = float(os.environ.get("MRI_ASYNC_BUDGET_SECS", "600"))
+
+
+def _job_gc_locked():
+    now = _time.time()
+    for k in [k for k, v in _JOBS.items() if now - v["updated"] > JOB_TTL_SECS]:
+        _JOBS.pop(k, None)
+
+
+def _job_set(job_id, **fields):
+    with _JOBS_LOCK:
+        j = _JOBS.get(job_id)
+        if j is None:
+            return False
+        j.update(fields)
+        j["updated"] = _time.time()
+        return True
+
+
+def _run_job(job_id, payload):
+    _BUDGET.value = ASYNC_BUDGET_SECS
+    t0 = _time.time()
+    try:
+        payload = dict(payload)
+        payload["stream"] = True
+        with app.test_request_context("/api/query", json=payload,
+                                      environ_base={"REMOTE_ADDR": INTERNAL_IP}):
+            rv = handle_query()
+            if isinstance(rv, tuple):          # (jsonify(...), status) error path
+                try:
+                    msg = (rv[0].get_json() or {}).get("error", f"HTTP {rv[1]}")
+                except Exception:
+                    msg = f"HTTP {rv[1]}"
+                _job_set(job_id, status="error", error=msg)
+                return
+            buf = ""
+            for raw in rv.response:
+                buf += raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+                lines = buf.split("\n")
+                buf = lines.pop()
+                for line in lines:
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    try:
+                        ev = json.loads(line[5:].strip())
+                    except json.JSONDecodeError:
+                        continue
+                    et = ev.get("type")
+                    with _JOBS_LOCK:
+                        j = _JOBS.get(job_id)
+                        if j is None:
+                            return                      # expired or cancelled
+                        if et == "text":
+                            j["text"] += ev.get("text", "")
+                        elif et == "done":
+                            j["meta"] = ev
+                            j["status"] = "done"
+                        elif et == "error":
+                            j["error"] = ev.get("text")
+                            j["status"] = "error"
+                        j["updated"] = _time.time()
+        with _JOBS_LOCK:
+            j = _JOBS.get(job_id)
+            if j and j["status"] == "running":
+                # Generator finished without a 'done' event. Not fatal - the text
+                # collected so far is real - but say so rather than hanging.
+                j["status"] = "done"
+                j["partial"] = True
+                j["updated"] = _time.time()
+        print(f"  [ASYNC] job {job_id[:8]} finished in {_time.time() - t0:.0f}s, "
+              f"{len(_JOBS.get(job_id, {}).get('text', '')):,} chars")
+    except Exception as e:
+        print(f"  ✗ [ASYNC] job {job_id[:8]} failed after {_time.time() - t0:.0f}s: {e}")
+        _job_set(job_id, status="error", error=f"{type(e).__name__}: {e}")
+
+
+@app.route('/api/query/async', methods=['POST'])
+def start_query_job():
+    """Submit a query. Returns a job id immediately; poll for the result."""
+    client_ip = request.remote_addr or 'unknown'
+    if not check_rate_limit(client_ip):
+        return jsonify({"error": "Rate limit exceeded. Please wait a moment."}), 429
+
+    body = request.json or {}
+    if not body.get('query'):
+        return jsonify({"error": "No query provided"}), 400
+
+    job_id = _uuid.uuid4().hex
+    with _JOBS_LOCK:
+        _job_gc_locked()
+        _JOBS[job_id] = {"status": "running", "text": "", "meta": None,
+                         "error": None, "partial": False,
+                         "created": _time.time(), "updated": _time.time()}
+    _threading.Thread(target=_run_job, args=(job_id, body), daemon=True).start()
+    print(f"  [ASYNC] job {job_id[:8]} started: {body.get('query', '')[:70]!r}")
+    return jsonify({"job_id": job_id,
+                    "poll": f"/api/query/result/{job_id}",
+                    "budget_secs": ASYNC_BUDGET_SECS}), 202
+
+
+@app.route('/api/query/result/<job_id>', methods=['GET'])
+def poll_query_job(job_id):
+    """Return everything generated since ?cursor=N. Cheap; poll about once a second."""
+    try:
+        cursor = max(0, int(request.args.get("cursor", 0)))
+    except (TypeError, ValueError):
+        cursor = 0
+
+    with _JOBS_LOCK:
+        j = _JOBS.get(job_id)
+        if j is None:
+            return jsonify({
+                "error": "Unknown or expired job id.",
+                "hint": ("If the server runs more than one gunicorn worker, the poll "
+                         "can land on a process that never saw this job. Start it with "
+                         "--workers 1 --threads 8."),
+            }), 404
+        text, status = j["text"], j["status"]
+        meta, err, partial = j["meta"], j["error"], j["partial"]
+        elapsed = _time.time() - j["created"]
+
+    return jsonify({
+        "status": status,                      # running | done | error
+        "delta": text[cursor:] if cursor <= len(text) else "",
+        "cursor": len(text),
+        "elapsed_secs": round(elapsed, 1),
+        "partial": partial,
+        "done_meta": meta,
+        "error": err,
+    })
+
+
+@app.route('/api/query/cancel/<job_id>', methods=['POST'])
+def cancel_query_job(job_id):
+    """Drop a job. The worker notices the entry is gone and stops."""
+    with _JOBS_LOCK:
+        existed = _JOBS.pop(job_id, None) is not None
+    return jsonify({"cancelled": existed})
 
 
 @app.route('/api/raw', methods=['POST'])
@@ -1849,7 +2042,11 @@ def list_cities():
 def health():
     """Health check — always returns 200 so Railway healthcheck passes.
     Reports config and Neo4j status for debugging."""
-    status = {"status": "ok", "config": _CONFIG_OK}
+    # A build marker so it is possible to tell WHICH app.py is running without
+    # guessing from behaviour. Bump this string whenever app.py changes.
+    status = {"status": "ok", "config": _CONFIG_OK,
+              "build": "2026-08-20-async",
+              "async_generation": True}
     if _CONFIG_OK and NEO4J_PASSWORD:
         try:
             d = get_driver()
