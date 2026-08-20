@@ -1171,6 +1171,16 @@ When analyzing product mix:
 
 This is the MOST IMPORTANT analysis mode. When a CXO or land acquisition head asks for feasibility, they expect a report that matches what Anarock, Knight Frank, or CBRE would deliver. Follow this EXACT framework.
 
+**ONE VERDICT ONLY.**
+Where a COMPUTED FEASIBILITY block is supplied it is the sole source of every
+number in the report. If you believe its selling price contradicts the LF data
+you can see, that is a DATA FAULT, not something to work around: say so at the
+top, state both figures, and stop. Do not publish a P&L under two prices, do not
+put NO-GO in the verdict and GO in the economics, and do not tell the reader to
+"extend the table mentally". A report that says "the price input is wrong, here
+is the evidence" is useful. A report carrying two opposite verdicts is not.
+
+
 **LENGTH DISCIPLINE (the server has a hard time limit).**
 The full report must be generated in under 100 seconds or the connection is cut
 mid-sentence and the reader gets nothing after that point. Therefore:
@@ -1505,6 +1515,10 @@ def handle_query():
     # none of which raised an error.
     _feas_block, _feas_why = build_feasibility_block(user_query, data_results)
     print(f"[DIAG-8] FEASIBILITY_CALC: {_feas_why}")
+    # The price and its quarter are the single most consequential inputs in the
+    # whole report. Log them explicitly so a stale one is greppable, not
+    # inferred three reports later from a margin that looked odd.
+    print(f"[DIAG-8b] FEASIBILITY_PRICE_PROVENANCE: {_feas_why}")
     if _feas_block:
         data_text = data_text + "\n\n" + _feas_block
 
@@ -1753,41 +1767,110 @@ except Exception as _e:            # module missing -> behave exactly as before
     _FEAS_OK = False
 
 
-def _lf_price_and_velocity(data_results):
-    """Pull price and monthly velocity out of the LF rows already fetched.
+def _quarter_sort_key(label):
+    """('Q1 26-27') -> (2026, 1). None when the label is not an LF FY quarter."""
+    m = re.match(r"\s*Q([1-4])\s*(\d{2})\s*-\s*(\d{2})\s*$", str(label or ""))
+    if not m:
+        return None
+    return (2000 + int(m.group(2)), int(m.group(1)))
 
-    Preference order matters. ABSORPTION price is what units actually transact
-    at; weighted-average-on-marketable-supply is the asking price and runs
-    higher (Hinjewadi Q1 26-27: absorption 8,455 vs asking 8,571). Revenue
-    projection uses the transacted figure - the more conservative and the more
-    defensible of the two.
+
+_QUARTER_COLS = ("quarter", "fy_qtr", "fy_quarter", "period")
+
+
+def _latest_row(result):
+    """Return (row, quarter_label, ordering) for the most RECENT row.
+
+    LF time series come back `ORDER BY q.sort_order`, so the newest quarter is
+    the LAST row. Taking the first row - which is what this code used to do -
+    prices a 2026 project off the oldest quarter on file.
     """
-    absorption = wt_avg = velocity = None
-    for r in data_results or []:
-        rows = r.get("data") or r.get("rows") or []
-        if not isinstance(rows, list):
+    rows = result.get("data") or result.get("rows") or []
+    if not isinstance(rows, list):
+        return None, None, None
+    dated = []
+    for idx, row in enumerate(rows):
+        if not isinstance(row, dict):
             continue
-        for row in rows:
-            if not isinstance(row, dict):
+        label = next((row[c] for c in _QUARTER_COLS if row.get(c)), None)
+        dated.append((_quarter_sort_key(label), idx, row, label))
+    if not dated:
+        return None, None, None
+    if any(d[0] is not None for d in dated):
+        dated.sort(key=lambda d: (d[0] is None, d[0] or (0, 0), d[1]))
+        ordering = "quarter label"
+    else:
+        ordering = "row order (no quarter column)"
+    _, _, row, label = dated[-1]
+    return row, label, ordering
+
+
+# Only these queries may supply a price. Scanning every column of every result
+# is how an unrelated series got to decide what a project sells for.
+_PRICE_QUERIES = ("price_trend_saleable", "micromarket_price_trend", "price_trend")
+_CARPET_PRICE_QUERIES = ("price_trend_carpet",)
+_VELOCITY_QUERIES = ("velocity_trend",)
+
+
+def _lf_price_and_velocity(data_results, want_carpet=False):
+    """Latest-quarter absorption price and velocity, with provenance.
+
+    Returns (price, velocity, basis, quarter, detail). Absorption price - what
+    units actually transacted at - is preferred over the weighted average on
+    marketable supply, which is the asking price and runs higher.
+    """
+    names = _CARPET_PRICE_QUERIES if want_carpet else _PRICE_QUERIES
+    candidates = []                      # (basis, value, quarter, query, ordering)
+    for r in data_results or []:
+        qn = str(r.get("query") or "")
+        if qn not in names:
+            continue
+        row, quarter, ordering = _latest_row(r)
+        if not row:
+            continue
+        for field, basis in (("absorption_price", "absorption"),
+                             ("wt_avg_price", "weighted average (asking)")):
+            try:
+                fv = float(row.get(field))
+            except (TypeError, ValueError):
                 continue
-            for k, v in row.items():
-                if v in (None, ""):
-                    continue
-                lk = str(k).lower()
+            if 1000 < fv < 100000:
+                candidates.append((basis, fv, quarter, qn, ordering))
+
+    price = basis = quarter = None
+    detail = "no price series in the retrieved data"
+    if candidates:
+        absorb = [c for c in candidates if c[0] == "absorption"]
+        chosen = (absorb or candidates)[0]
+        basis, price, quarter, qname, ordering = chosen
+        detail = f"{basis}, {quarter or 'undated'}, via {qname}, ordered by {ordering}"
+
+        # Sanity guard. Compare like with like: if two sources both claim to be
+        # the latest absorption price and disagree wildly, we do not know which
+        # series is right, so we publish nothing. Comparing the pick against the
+        # median of ALL candidates would not catch this - the pick often IS the
+        # median.
+        same_basis = sorted(c[1] for c in candidates if c[0] == basis)
+        if len(same_basis) > 1 and (
+                (same_basis[-1] - same_basis[0]) / same_basis[0] > 0.25):
+            return None, None, None, None, (
+                f"ABSTAINED: sources disagree on the latest {basis} price "
+                f"({[round(v) for v in same_basis]}) - refusing to guess")
+
+    velocity = None
+    for r in data_results or []:
+        if str(r.get("query") or "") in _VELOCITY_QUERIES:
+            row, _, _ = _latest_row(r)
+            if row:
                 try:
-                    fv = float(v)
+                    fv = float(row.get("velocity"))
                 except (TypeError, ValueError):
-                    continue
-                if 1000 < fv < 100000:
-                    if absorption is None and "absorption" in lk:
-                        absorption = fv
-                    elif wt_avg is None and ("wt_avg" in lk or "price_psf" in lk
-                                             or lk in ("price", "wt_avg_price", "saleable_price")):
-                        wt_avg = fv
-                if velocity is None and "velocit" in lk and 0 < fv < 50:
+                    fv = None
+                if fv is not None and 0 < fv < 50:
                     velocity = fv
-    return (absorption or wt_avg), velocity, ("absorption" if absorption else
-                                              "weighted average (asking)" if wt_avg else None)
+                    break
+
+    return price, velocity, basis, quarter, detail
 
 
 def build_feasibility_block(user_query, data_results):
@@ -1801,10 +1884,16 @@ def build_feasibility_block(user_query, data_results):
     if inp is None:
         return None, "not a feasibility query"
 
-    lf_price, lf_vel, lf_basis = _lf_price_and_velocity(data_results)
+    want_carpet = bool(re.search(r"carpet|rera.basis", user_query or "", re.I))
+    lf_price, lf_vel, lf_basis, lf_qtr, lf_detail = _lf_price_and_velocity(
+        data_results, want_carpet=want_carpet)
+    if str(lf_detail).startswith("ABSTAINED"):
+        return None, lf_detail
+
     if inp.price_psf is None and lf_price:
         inp.price_psf = lf_price
-        inp.price_psf_source = f"LF knowledge base, {lf_basis} price, latest quarter"
+        inp.price_psf_source = (
+            f"LF knowledge base, {lf_basis} price, {lf_qtr or 'latest available quarter'}")
     if inp.monthly_velocity_pct is None and lf_vel:
         inp.monthly_velocity_pct = lf_vel
 
@@ -1812,9 +1901,23 @@ def build_feasibility_block(user_query, data_results):
         return None, "insufficient inputs: " + ", ".join(inp.missing())
     try:
         from feasibility import compute_with_launch_plan as _feas_full
-        return _feas_render(_feas_full(inp)), "computed"
+        block = _feas_render(_feas_full(inp))
     except Exception as e:
         return None, f"compute error: {e}"
+
+    # State the price and its vintage inside the block. A stale input caused a
+    # report to carry NO-GO in its verdict and GO in its economics; making the
+    # basis visible means any recurrence is caught by the reader, not tolerated
+    # by the model.
+    header = (
+        f"> **Price basis for every figure below: Rs.{int(inp.price_psf):,} PSF"
+        f"{' (carpet)' if want_carpet else ' (saleable)'}"
+        f" - LF {lf_basis or 'price'}, {lf_qtr or 'latest available quarter'}.**\n"
+        "> This is the latest quarter in the LF series. If any LF figure quoted "
+        "elsewhere in this report contradicts it, STOP: report the discrepancy "
+        "as the finding and do not issue a verdict.\n"
+    )
+    return header + "\n" + block, f"computed [{lf_detail}]"
 
 
 # ── Generation deadline ─────────────────────────────────────────────────────

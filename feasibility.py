@@ -318,12 +318,15 @@ def compute(inp: FeasibilityInputs) -> dict:
         collected = booked * (1 - collect_lag) + carried
         carried = booked * collect_lag
         build = costs["construction_cr"] * build_curve[i]
-        net = collected - build - other_annual
-        flows.append(net); cum += net
+        # NOT `net`. `net` is the net PLOT AREA computed at the top of this
+        # function; reusing the name here overwrote it with the last year's net
+        # cash flow, so the block reported a 5-acre plot as "25 sq.ft".
+        net_cf = collected - build - other_annual
+        flows.append(net_cf); cum += net_cf
         table.append(dict(year=i + 1, label=f"Year {i+1}",
                           revenue_cr=round(booked, 2), collections_cr=round(collected, 2),
                           construction_cr=round(-build, 2), other_cr=round(-other_annual, 2),
-                          net_cr=round(net, 2), cumulative_cr=round(cum, 2)))
+                          net_cr=round(net_cf, 2), cumulative_cr=round(cum, 2)))
     if carried > 0.005:                       # final collections after completion
         flows.append(carried); cum += carried
         table.append(dict(year=yrs + 1, label="Post-completion", revenue_cr=0.0,
@@ -619,7 +622,18 @@ def render_markdown(r: dict) -> str:
     L.append("")
     L.append(f"- Margin on revenue: **{r['margin_on_revenue_pct']}%** | Margin on cost: {r['margin_on_cost_pct']}%")
     L.append(f"- Breakeven: **Rs.{r['breakeven_psf']:,} PSF** (cushion Rs.{r['price_cushion_psf']:,} PSF below market)")
-    L.append(f"- Maximum viable land cost at {i['target_margin_pct']}% margin: **Rs.{r['max_viable_land_cr']} Cr**")
+    if r["max_viable_land_cr"] > 0:
+        L.append(f"- Maximum viable land cost at {i['target_margin_pct']}% margin: "
+                 f"**Rs.{r['max_viable_land_cr']} Cr**")
+    else:
+        # A negative figure here is arithmetically real but meaningless as a
+        # price - it says the build does not cover itself at this selling price,
+        # so no land cost works. Printing "Rs.-27.48 Cr" invites the reader to
+        # think the model is broken. Say what it means instead.
+        L.append(f"- Maximum viable land cost at {i['target_margin_pct']}% margin: "
+                 f"**none** - at Rs.{r['price_psf']:,} PSF the project does not "
+                 f"cover its construction and financing, so no land price makes "
+                 f"it viable. Check the selling price before reading further.")
     L.append(f"- Project IRR: **{r['irr_pct']}%**" if r["irr_pct"] is not None else "- Project IRR: not computable")
     L.append(f"- NPV: " + " | ".join(f"{k} Rs.{v} Cr" for k, v in r["npv_cr"].items()))
     L.append(f"- Peak equity Rs.{r['peak_equity_cr']} Cr | Equity multiple {r['equity_multiple']}x")
