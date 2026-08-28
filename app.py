@@ -1207,6 +1207,23 @@ When analyzing product mix:
 
 This is the MOST IMPORTANT analysis mode. When a CXO or land acquisition head asks for feasibility, they expect a report that matches what Anarock, Knight Frank, or CBRE would deliver. Follow this EXACT framework.
 
+**THE EXECUTIVE VERDICT QUOTES; IT DOES NOT RESTATE.**
+Write STEP 0 last, after the economics exist, and copy its figures from the body
+verbatim. Never write a headline number from memory or from a rough sense of the
+answer - that is how one report carried breakeven Rs.10,200 in Step 0 and
+Rs.13,200 in Step 3, and told a developer he had 19% headroom when he was
+Rs.1,028 PSF short.
+- Breakeven, margin, IRR, equity multiple, maximum viable land and the site
+  score appear ONCE as computed values. Every later mention repeats those exact
+  digits.
+- A maximum viable land cost is meaningless without the price it assumes. Always
+  write it as "Rs.X Cr at Rs.Y PSF".
+- Before issuing GO or CONDITIONAL GO, check the land cost against the maximum
+  viable land cost at the price you are recommending. If the ask exceeds it, the
+  verdict is NO-GO or CONDITIONAL on a higher price - say which.
+
+Follow this EXACT framework:
+
 **NO PROSE ARITHMETIC. NONE.**
 Every financial figure in a feasibility report comes from the COMPUTED
 FEASIBILITY block or it does not appear.
@@ -2310,7 +2327,7 @@ def health():
     # A build marker so it is possible to tell WHICH app.py is running without
     # guessing from behaviour. Bump this string whenever app.py changes.
     status = {"status": "ok", "config": _CONFIG_OK,
-              "build": "2026-08-27-pinprojects",
+              "build": "2026-08-28-consistency",
               "async_generation": True}
     if _CONFIG_OK and NEO4J_PASSWORD:
         try:
