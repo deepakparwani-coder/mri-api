@@ -1242,6 +1242,12 @@ function validateResponse(fullText, chartObjects) {
   // 3. A scorecard is a number the reader is asked to act on, so it has to be
   // auditable from the rows on the page.
   validateScorecard(fullText).forEach(function(w) { allWarnings.push(w); });
+
+  // 4. The headline financials must agree across sections. Each section can be
+  // internally consistent and still contradict the next one - that is exactly
+  // how a report shipped "19% headroom" in Step 0 and "below breakeven" in
+  // Step 3, off two different breakeven figures.
+  validateFigures(fullText).forEach(function(w) { allWarnings.push(w); });
   
   return allWarnings;
 }
@@ -1255,6 +1261,127 @@ function validateResponse(fullText, chartObjects) {
 //   65/80 in Step 0, 60/80 in the table and in the final verdict
 // The first version of this check compared only the total against the rows, so
 // it was silent on the second case.
+// Cross-section consistency for the numbers a developer decides on.
+//
+// From the 26-Aug Whitefield report:
+//   Step 0  breakeven Rs.10,200 | max viable land Rs.480 Cr at Rs.12,172 | GO
+//   Step 3D breakeven Rs.13,200 | max viable land Rs.330 Cr at Rs.12,172
+// The land ask was Rs.400 Cr. Step 3 puts it Rs.70 Cr over the bar; Step 0 said
+// CONDITIONAL GO. Each section reads fine on its own, so only a cross-section
+// check finds it.
+//
+// Deliberately narrow. Margin and IRR legitimately differ by scenario, so they
+// are not compared - a validator that fires on correct reports gets ignored.
+function _cnum(s) {
+  var v = parseFloat(String(s).replace(/[, ]/g, ""));
+  return isFinite(v) ? v : null;
+}
+
+function _uniq(a) {
+  return a.filter(function (v, i, arr) { return arr.indexOf(v) === i; });
+}
+
+function validateFigures(text) {
+  var w = [], m;
+  if (!text) return w;
+
+  // ── 1. breakeven must be a single number ────────────────────────────────
+  // "PSF" can sit on either side of the number - "Breakeven Price PSF: Rs.10,200"
+  // as well as "Breakeven ... Rs.13,200 PSF" - so match the number and then
+  // require PSF somewhere in the whole match. The gap must allow "Rs." itself,
+  // so it cannot exclude "." (that bug made this find nothing at all).
+  var be = [], reBe = /break\s*-?\s*even[^\n|]{0,70}?Rs\.?\s*([\d,]+)(?!\s*(?:Cr|Crore))/gi;
+  while ((m = reBe.exec(text)) !== null) {
+    if (!/PSF|per\s*sq/i.test(m[0])) continue;   // a rupee figure, but not a rate
+    var v = _cnum(m[1]);
+    if (v !== null && v > 500) be.push(v);
+  }
+  var beU = _uniq(be);
+  if (beU.length > 1) {
+    w.push("Breakeven price is stated as Rs." + beU.join(" and Rs.") +
+           " PSF in different sections - these cannot all be right.");
+  }
+
+  // ── 2. maximum viable land cost is a function of price ──────────────────
+  // Capture the land figure and, where the same clause names one, the price it
+  // was computed at.
+  var pairs = [], reLand =
+    /max(?:imum)?\s+viable\s+land[^\n|]{0,80}?Rs\.?\s*\(?\s*(-?[\d,]+(?:\.\d+)?)\s*\)?\s*(?:Cr|Crore)/gi;
+  while ((m = reLand.exec(text)) !== null) {
+    var land = _cnum(m[1]);
+    if (land === null) continue;
+    // The price must come from THIS clause. Looking backwards picked up the
+    // previous line's breakeven and paired it with the wrong land figure.
+    // Two real shapes:
+    //   "Max Viable Land (at Rs.12,172 PSF, 15% margin) ~Rs.330 Cr"  -> inside
+    //   "Max Viable Land: Rs.480 Crores (at Rs.12,172 PSF pricing)"  -> just after
+    var tail = text.slice(m.index + m[0].length,
+                          m.index + m[0].length + 80).split("\n")[0];
+    var rePsf = /Rs\.?\s*([\d,]+)\s*PSF/i;
+    var pm = rePsf.exec(m[0]) || rePsf.exec(tail);
+    pairs.push({ land: land, price: pm ? _cnum(pm[1]) : null });
+  }
+  var byPrice = {};
+  pairs.forEach(function (p) {
+    if (p.price === null) return;
+    (byPrice[p.price] = byPrice[p.price] || []).push(p.land);
+  });
+  Object.keys(byPrice).forEach(function (price) {
+    var lands = _uniq(byPrice[price]);
+    if (lands.length > 1) {
+      w.push("Maximum viable land cost at Rs." + Number(price).toLocaleString() +
+             " PSF is given as Rs." + lands.join(" Cr and Rs.") +
+             " Cr in different sections.");
+    }
+  });
+  var byLand = {};
+  pairs.forEach(function (p) {
+    if (p.price === null) return;
+    (byLand[p.land] = byLand[p.land] || []).push(p.price);
+  });
+  Object.keys(byLand).forEach(function (land) {
+    var prices = _uniq(byLand[land]);
+    if (prices.length > 1) {
+      w.push("A maximum viable land cost of Rs." + land +
+             " Cr is attributed to two different prices (Rs." +
+             prices.join(" and Rs.") + " PSF).");
+    }
+  });
+
+  // ── 3. a GO verdict has to clear its own bar ────────────────────────────
+  // "Land Cost" also occurs inside "Maximum Viable Land Cost", which would make
+  // the bar look like the ask. Skip any match preceded by "viable".
+  var ask = null, reAsk =
+    /land\s*(?:cost|price|ask|acquisition)[^\n|]{0,40}?Rs\.?\s*([\d,]+(?:\.\d+)?)\s*(?:Cr|Crore)/gi;
+  while ((m = reAsk.exec(text)) !== null) {
+    var lead = text.slice(Math.max(0, m.index - 30), m.index + 12);
+    if (/viable/i.test(lead)) continue;
+    ask = _cnum(m[1]);
+    break;
+  }
+  if (ask === null) {
+    var am2 = /Rs\.?\s*([\d,]+(?:\.\d+)?)\s*(?:Cr|Crore)[^\n|]{0,30}?land\s*(?:cost|ask)/i.exec(text);
+    if (am2) ask = _cnum(am2[1]);
+  }
+  var isGo = /VERDICT\s*:?\s*(CONDITIONAL\s+)?GO\b/i.test(text) &&
+             !/VERDICT\s*:?\s*NO[\s-]*GO/i.test(text);
+  if (ask !== null && isGo && pairs.length) {
+    var below = pairs.filter(function (p) { return p.land < ask; });
+    if (below.length && below.length === pairs.length) {
+      w.push("Verdict is GO, but every maximum viable land cost stated (Rs." +
+             _uniq(below.map(function (p) { return p.land; })).join(" Cr, Rs.") +
+             " Cr) is below the Rs." + ask + " Cr land cost.");
+    } else if (below.length) {
+      w.push("Verdict is GO, but at least one maximum viable land cost (Rs." +
+             _uniq(below.map(function (p) { return p.land; })).join(" Cr, Rs.") +
+             " Cr) is below the Rs." + ask + " Cr land cost - state which price " +
+             "the verdict assumes.");
+    }
+  }
+
+  return w;
+}
+
 function validateScorecard(text) {
   var w = [];
   if (!text) return w;
