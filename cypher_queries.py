@@ -27,6 +27,38 @@ QUERY_DEFINITIONS = {
     # MARKET OVERVIEW (L0)
     # ═══════════════════════════════════════
 
+    "pin_projects": {
+        "description": (
+            "PROJECTS within radius_km of the map pin, ordered by true distance, "
+            "each with distance_km. This is the ONLY query that can answer "
+            "'nearest projects', 'closest vicinity', 'competition around this "
+            "site' or 'benchmark projects near the pin'. Distances are "
+            "point-to-point from geocoded project coordinates (point.distance). "
+            "Do NOT substitute a city-wide sales ranking for this and describe it "
+            "as nearby - if this query returns zero rows, the spatial ranking is "
+            "unavailable and the report must say so."
+        ),
+        "cypher": """
+            MATCH (p:Project {city_name: $city})
+            WHERE p.location IS NOT NULL
+            WITH p, point.distance(p.location,
+                     point({latitude: $lat, longitude: $lng})) / 1000.0 AS km
+            WHERE km <= $radius_km
+            RETURN round(km * 10) / 10        AS distance_km,
+                   p.name                     AS project,
+                   p.builder_name             AS builder,
+                   p.total_supply_units       AS total_supply,
+                   p.annual_sales_units       AS annual_sales,
+                   p.sold_pct                 AS sold_pct,
+                   p.saleable_rate_psf        AS saleable_psf,
+                   p.carpet_rate_psf          AS carpet_psf,
+                   p.monthly_velocity         AS velocity,
+                   p.annual_months_inv        AS months_inventory
+            ORDER BY km
+            LIMIT 15
+        """,
+    },
+
     "pin_catchment": {
         "description": (
             "Micromarkets within radius_km of the map pin the user pasted, with "

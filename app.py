@@ -1207,6 +1207,47 @@ When analyzing product mix:
 
 This is the MOST IMPORTANT analysis mode. When a CXO or land acquisition head asks for feasibility, they expect a report that matches what Anarock, Knight Frank, or CBRE would deliver. Follow this EXACT framework.
 
+**NO PROSE ARITHMETIC. NONE.**
+Every financial figure in a feasibility report comes from the COMPUTED
+FEASIBILITY block or it does not appear.
+- If that block says NOT RUN, produce no P&L, no revenue, no margin, no IRR, no
+  breakeven, no cash flow. Name the missing inputs and stop at that point.
+- Never invent FSI/FAR, efficiency, construction cost, collection profile or
+  discount rate to fill a gap. An assumed input silently scales every number
+  after it.
+- "DERIVED" is not a licence. To a developer it reads as "derived from data".
+  If a figure rests on an assumption you chose, it is an ASSUMPTION - say so in
+  the same sentence, with the value you assumed and where it came from.
+
+**FSI / FAR IS NEVER ASSUMED.**
+It multiplies the entire appraisal - moving it 2.5 to 3.0 changed one report's
+revenue by Rs.164 Cr. So:
+- Use FSI/FAR only if the user supplied it, or a cited regulatory source gives
+  it for this authority, zone and road width.
+- If neither exists, do NOT pick one. Show the buildable area and revenue across
+  a band (2.0 / 2.5 / 3.0 / 3.25), say the verdict depends on which applies, and
+  put "confirm sanctioned FAR" at the top of the actions list.
+- Name the planning AUTHORITY, not the state - FAR is set per authority
+  (GBA/BBMP, BDA, BMRDA, PMRDA, KMC), and they differ materially.
+
+Follow this EXACT framework:
+
+**PROXIMITY CLAIMS MUST COME FROM PROXIMITY DATA.**
+If you call a table "nearest", "closest", "in the vicinity", "around the site" or
+"within X km", it must be built from `pin_projects` and it must show the
+`distance_km` column so the reader can check it.
+- `pin_catchment` gives MICROMARKETS, not projects. It cannot answer "which
+  projects are nearby".
+- `top_projects_by_sales` and every other ranking is CITY-WIDE. Never describe
+  one as near the pin. A developer knows his own geography and will see it
+  instantly - this exact substitution cost a demo.
+- If `pin_projects` returned no rows, write "spatial ranking unavailable - no
+  project coordinates within the radius" and rank by sales WITHOUT calling it
+  nearby.
+- State the radius you used in the table caption.
+
+Follow this EXACT framework:
+
 **AREA BASIS: NEVER CONVERT A PRICE.**
 Saleable PSF and carpet PSF are two separate measured series in the LF data.
 Carpet PSF is NOT saleable PSF divided by a ratio, and you must never produce
@@ -1543,6 +1584,24 @@ def handle_query():
         if geo.get("lat") is not None:
             data_results.append(run_query("pin_catchment",
                 city=city, lat=geo["lat"], lng=geo["lng"], radius_km=5.0))
+            # pin_catchment returns MICROMARKETS. A question about nearby
+            # PROJECTS had no query at all, so a city-wide sales ranking was
+            # captioned "closest vicinity to the pin" and a developer caught it
+            # in a demo. Widen the radius once if the first pass is thin - a
+            # sparse micromarket should not silently become a city-wide list.
+            _pin_projects = run_query("pin_projects",
+                city=city, lat=geo["lat"], lng=geo["lng"], radius_km=5.0)
+            if _pin_projects.get("row_count", 0) < 5:
+                _wider = run_query("pin_projects",
+                    city=city, lat=geo["lat"], lng=geo["lng"], radius_km=10.0)
+                if _wider.get("row_count", 0) > _pin_projects.get("row_count", 0):
+                    _wider["description"] = (_wider.get("description", "") +
+                        " NOTE: radius widened to 10 km because fewer than 5 "
+                        "projects lie within 5 km. State the radius used.")
+                    _pin_projects = _wider
+            print(f"  [PIN] pin_projects: {_pin_projects.get('row_count', 0)} projects "
+                  f"with coordinates near the pin")
+            data_results.append(_pin_projects)
         if geo.get("matched_micromarket"):
             data_results.append(run_query("micromarket_detail",
                 city=city, location=geo["matched_micromarket"]))
@@ -1981,7 +2040,27 @@ def build_feasibility_block(user_query, data_results):
         inp.monthly_velocity_pct = lf_vel
 
     if not inp.is_sufficient() or inp.price_psf is None:
-        return None, "insufficient inputs: " + ", ".join(inp.missing())
+        missing = inp.missing()
+        if inp.price_psf is None and "price_psf" not in missing:
+            missing = list(missing) + ["selling price (no LF price series retrieved)"]
+        # Returning None here used to leave a SILENCE, and the model filled it -
+        # inventing FSI 2.5, efficiency 68% and Rs.4,000 PSF construction, each
+        # labelled "DERIVED". An explicit refusal is harder to paper over than an
+        # absence, so the abstention is now stated in the model's own context.
+        block = (
+            "=== COMPUTED FEASIBILITY: NOT RUN ===\n"
+            "The deterministic calculator did NOT run, because these inputs are "
+            "missing:\n"
+            + "".join(f"  - {m}\n" for m in missing) +
+            "\nTherefore NO feasibility figure exists for this query. You must "
+            "NOT supply one.\n"
+            "Do not assume FSI/FAR, efficiency, construction cost, collection "
+            "profile, IRR or margin. Do not label an assumed figure 'DERIVED' - "
+            "to the reader that reads as 'derived from data'.\n"
+            "Write the market analysis you CAN support from LF data, then state "
+            "plainly which inputs are needed to run the appraisal, and stop.\n"
+        )
+        return block, "ABSTAINED (block states the gap): " + ", ".join(missing)
     try:
         from feasibility import compute_with_launch_plan as _feas_full
         block = _feas_render(_feas_full(inp))
@@ -2231,7 +2310,7 @@ def health():
     # A build marker so it is possible to tell WHICH app.py is running without
     # guessing from behaviour. Bump this string whenever app.py changes.
     status = {"status": "ok", "config": _CONFIG_OK,
-              "build": "2026-08-20-async",
+              "build": "2026-08-27-pinprojects",
               "async_generation": True}
     if _CONFIG_OK and NEO4J_PASSWORD:
         try:
