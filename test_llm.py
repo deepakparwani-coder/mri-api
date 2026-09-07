@@ -208,7 +208,7 @@ def main() -> int:
     check("CLAUDE_MODEL is still honoured on anthropic",
           load("anthropic").model_name() == "claude-sonnet-4-6")
     check("CLAUDE_MODEL is ignored on openai",
-          load("openai").model_name() == "gpt-5", load("openai").model_name())
+          load("openai").model_name() == "gpt-5.6-terra", load("openai").model_name())
 
     os.environ["MRI_LLM_MODEL"] = "claude-sonnet-4-6"
     llm = load("openai"); llm.reset_client()
@@ -220,16 +220,57 @@ def main() -> int:
     except Exception as e:
         check("a mismatched MRI_LLM_MODEL fails loudly at boot", False, repr(e))
 
-    os.environ["MRI_LLM_MODEL"] = "gpt-5-mini"
+    os.environ["MRI_LLM_MODEL"] = "gpt-5.6-luna"
     check("an openai model id still overrides the default",
-          load("openai").model_name() == "gpt-5-mini")
+          load("openai").model_name() == "gpt-5.6-luna")
     os.environ.pop("MRI_LLM_MODEL", None)
     os.environ.pop("CLAUDE_MODEL", None)
     check("with neither set, each provider gets its own default",
-          load("openai").model_name() == "gpt-5"
+          load("openai").model_name() == "gpt-5.6-terra"
           and load("anthropic").model_name() == "claude-sonnet-4-6")
 
-    print("\n8. THE REST OF THE APP IS UNTOUCHED")
+    print("\n8. THE DEFAULT MODEL IS A MODEL THAT EXISTS")
+    # "gpt-5" is not in OpenAI's current model list (GPT-6 Astra, GPT-5.6
+    # Sol/Terra/Luna). Shipping it as the default would have 404'd on the first
+    # query after the switch.
+    llm = load("openai")
+    check("the openai default is not the retired gpt-5", llm.model_name() != "gpt-5")
+    check("the openai default is a current id",
+          llm.model_name() in ("gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna",
+                               "gpt-6-astra"), llm.model_name())
+
+    print("\n9. REASONING EFFORT IS TUNABLE, AND OFF BY DEFAULT")
+    os.environ.pop("MRI_LLM_REASONING", None)
+    llm = load("openai"); llm.reset_client(); llm._client = FakeOpenAI()
+    list(llm.stream(PARAMS))
+    check("nothing is sent when unset", "reasoning" not in FakeOpenAI.last_request)
+    check("health says provider default", llm.reasoning_effort() == "(provider default)")
+    os.environ["MRI_LLM_REASONING"] = "low"
+    llm = load("openai"); llm.reset_client(); llm._client = FakeOpenAI()
+    list(llm.stream(PARAMS))
+    check("it reaches the Responses call as an object",
+          FakeOpenAI.last_request.get("reasoning") == {"effort": "low"},
+          str(FakeOpenAI.last_request.get("reasoning")))
+    check("health reports the effort", llm.reasoning_effort() == "low")
+    llm = load("anthropic"); llm.reset_client(); llm._client = FakeAnthropic()
+    list(llm.stream(PARAMS))
+    check("anthropic is never sent a reasoning key",
+          "reasoning" not in FakeAnthropic.last_request)
+    os.environ.pop("MRI_LLM_REASONING", None)
+
+    print("\n10. AN EMPTY CONTINUABLE ROUND IS NOT CONTINUED")
+    # Reasoning tokens are charged against max_output_tokens, so a high effort
+    # can burn the whole ceiling and return stop=length with no text. Retrying
+    # that four times spends the budget and still ends in a truncation marker.
+    check("the empty-round guard exists", "if not _chunk.strip():" in app)
+    check("it breaks rather than continuing",
+          app.split("if not _chunk.strip():")[1].split("_round += 1")[0].count("break") == 1)
+    check("the log names the likely cause", "reasoning tokens" in app)
+    check("it is tested before the round counter increments",
+          app.index("if not _chunk.strip():") < app.index("_round += 1"))
+    check("health reports the effort too", '"llm_reasoning": llm.reasoning_effort()' in app)
+
+    print("\n11. THE REST OF THE APP IS UNTOUCHED")
     for needle, label in (
             ("NO PROSE ARITHMETIC", "no-prose-arithmetic rule"),
             ("NEVER CONVERT A PRICE", "carpet basis rule"),

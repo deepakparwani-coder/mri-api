@@ -1775,6 +1775,20 @@ def handle_query():
                     if _stop not in CONTINUABLE_STOPS:
                         _truncated = False
                         break
+                    # A continuable stop that produced NO text is not a report
+                    # that ran long - it is a round that generated nothing. On
+                    # OpenAI, reasoning tokens are charged against
+                    # max_output_tokens, so a high reasoning effort can consume
+                    # the entire ceiling before a single visible character is
+                    # emitted, and that surfaces as stop="length" with an empty
+                    # body. Continuing from it just burns the budget three more
+                    # times and still ends in a truncation marker.
+                    if not _chunk.strip():
+                        print(f"  [EMPTY] stop_reason={_stop} with no output text. "
+                              f"If provider={llm.provider()}, suspect reasoning tokens "
+                              f"consuming max_output_tokens - lower MRI_LLM_REASONING "
+                              f"or raise the token ceiling.")
+                        break
                     _round += 1
                     _left = _budget_left(_t0)
                     print(f"  [INCOMPLETE] stop_reason={_stop}, continuation {_round}/{MAX_CONTINUATIONS}, "
@@ -2321,6 +2335,7 @@ def health():
     # guessing from behaviour. Bump this string whenever app.py changes.
     status = {"status": "ok", "config": _CONFIG_OK,
               "llm_provider": llm.provider(), "llm_model": llm.model_name(),
+              "llm_reasoning": llm.reasoning_effort(),
               "build": "2026-08-29-llmshim",
               "async_generation": True}
     if _CONFIG_OK and NEO4J_PASSWORD:

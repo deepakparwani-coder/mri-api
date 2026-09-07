@@ -44,8 +44,17 @@ PROVIDER = os.environ.get("MRI_LLM_PROVIDER", "anthropic").strip().lower()
 
 _DEFAULT_MODEL = {
     "anthropic": "claude-sonnet-4-6",
-    "openai": "gpt-5",
+    # "gpt-5" is not in OpenAI's current model list. The live families are
+    # GPT-6 Astra and GPT-5.6 (Sol / Terra / Luna). Terra is the balanced tier
+    # and the sane default for report generation; Luna is the fast, cheap tier.
+    # Override per deployment with MRI_LLM_MODEL.
+    "openai": "gpt-5.6-terra",
 }
+
+# Reasoning effort is the single biggest latency lever on the GPT-5.6 family:
+# none | minimal | low | medium | high | xhigh | max. Left unset, the provider
+# default applies and nothing is sent. Anthropic ignores this entirely.
+REASONING = (os.environ.get("MRI_LLM_REASONING") or "").strip().lower()
 
 
 def model_name() -> str:
@@ -67,6 +76,10 @@ def model_name() -> str:
 
 def provider() -> str:
     return PROVIDER
+
+
+def reasoning_effort() -> str:
+    return REASONING or "(provider default)"
 
 
 # ── client construction ────────────────────────────────────────────────────
@@ -165,6 +178,13 @@ def _to_openai(p: dict) -> dict:
         msgs.append({"role": m["role"], "content": _flatten(m.get("content"))})
     out = {"model": model_name(), "input": msgs,
            "max_output_tokens": p["max_tokens"]}
+    if REASONING:
+        # Reasoning tokens are charged against max_output_tokens. At a high
+        # effort the model can spend the whole ceiling thinking and return no
+        # visible text at all - which arrives here as stop="length" with an
+        # empty body, indistinguishable from a truncated report unless you know
+        # to look. app.py's continuation loop has a guard for exactly that.
+        out["reasoning"] = {"effort": REASONING}
     if p.get("web_uses"):
         out["tools"] = [{"type": "web_search"}]
     return out
