@@ -48,7 +48,8 @@ except ImportError:
     exit(1)
 
 try:
-    import anthropic
+    import anthropic          # still used when MRI_LLM_PROVIDER=anthropic
+    import llm                # provider shim - see llm.py
 except ImportError:
     print("pip install anthropic")
     exit(1)
@@ -100,7 +101,10 @@ _CONFIG_OK = True
 if not NEO4J_PASSWORD:
     print("⚠ WARNING: NEO4J_PASSWORD env var not set. Database queries will fail.")
     _CONFIG_OK = False
-if not ANTHROPIC_KEY:
+if os.environ.get("MRI_LLM_PROVIDER", "anthropic").lower() == "openai":
+    if not os.environ.get("OPENAI_API_KEY"):
+        print("⚠ WARNING: MRI_LLM_PROVIDER=openai but OPENAI_API_KEY is not set.")
+elif not ANTHROPIC_KEY:
     print("⚠ WARNING: ANTHROPIC_API_KEY env var not set. Claude queries will fail.")
     _CONFIG_OK = False
 
@@ -125,7 +129,9 @@ def get_driver():
 def get_claude():
     global claude
     if claude is None:
-        claude = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+        # The shim owns client construction so the provider can change without
+        # touching this file. Kept assigning to `claude` for callers below.
+        claude = llm.get_client()
     return claude
 
 
@@ -1701,12 +1707,10 @@ def handle_query():
     token_limit = int(os.environ.get("MRI_MAX_TOKENS_FEASIBILITY", "16000")) \
         if is_feasibility else int(os.environ.get("MRI_MAX_TOKENS", "8000"))
 
-    api_params = {
-        "model": os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6"),
-        "max_tokens": token_limit,
-        "system": system_prompt,
-        "messages": messages,
-    }
+    # Provider-neutral. llm.py translates this into an Anthropic Messages call
+    # or an OpenAI Responses call depending on MRI_LLM_PROVIDER.
+    api_params = llm.build_params(system=system_prompt, messages=messages,
+                                  max_tokens=token_limit, web_uses=0)
 
     # Add web search tool if needed — limit uses to prevent timeout
     if web_mode:
@@ -1715,9 +1719,7 @@ def handle_query():
         # time available and the report never reaches its verdict.
         web_uses = int(os.environ.get("MRI_WEB_USES_FEASIBILITY", "2")) \
             if is_feasibility else int(os.environ.get("MRI_WEB_USES", "2"))
-        api_params["tools"] = [
-            {"type": "web_search_20250305", "name": "web_search", "max_uses": web_uses}
-        ]
+        api_params["web_uses"] = web_uses
 
     # Step 6: Call Claude
     if stream:
@@ -1727,8 +1729,9 @@ def handle_query():
         def generate():
             try:
                 _t0 = _time.time()
-                # Loop so a max_tokens/pause_turn stop resumes instead of ending
+                # Loop so a "length" or "pause" stop resumes instead of ending
                 # the report mid-sentence - but only while there is time left.
+                # Those names are llm.py's normalised vocabulary, not a vendor's.
                 _params = api_params
                 _full = ""
                 _round = 0
@@ -1736,41 +1739,31 @@ def handle_query():
                 _deadline_hit = False
                 while True:
                     _chunk = ""
-                    with client.messages.stream(**_params) as s:
-                        # Iterate raw events so we can capture both text chunks
-                        # AND server_tool_use (web_search) invocations for audit.
-                        for event in s:
-                            # THE CLOCK BELONGS HERE. Checking it only between
-                            # continuations meant one long call could run past
-                            # the gateway limit untouched - which is exactly
-                            # what was happening: ~300s of generation against a
-                            # ~120s cap, severed mid-word, no marker, every time.
-                            if _budget_left(_t0) <= 0:
-                                _deadline_hit = True
-                                break
-                            et = getattr(event, "type", None)
-                            if et == "content_block_delta":
-                                delta = getattr(event, "delta", None)
-                                if delta is not None and getattr(delta, "type", "") == "text_delta":
-                                    txt = getattr(delta, "text", "")
-                                    if txt:
-                                        _chunk += txt
-                                        yield f"data: {json.dumps({'type': 'text', 'text': txt})}\n\n"
-                            elif et == "content_block_start":
-                                block = getattr(event, "content_block", None)
-                                btype = getattr(block, "type", "") if block else ""
-                                if btype == "server_tool_use" and getattr(block, "name", "") == "web_search":
-                                    # AUDIT LOG — Fix C
-                                    search_input = getattr(block, "input", {}) or {}
-                                    search_query = search_input.get("query", "<unknown>")
-                                    print(
-                                        f"  🔍 [WEB_SEARCH_AUDIT] "
-                                        f"user_query={user_query[:80]!r} "
-                                        f"categories={fired_categories} "
-                                        f"claude_searched={search_query!r}"
-                                    )
-                        if not _deadline_hit:
-                            _final = s.get_final_message()
+                    _stop = "end"
+                    # Normalised events from the shim: ("text"|"search"|"stop").
+                    # Identical handling whichever provider answered.
+                    for _kind, _val in llm.stream(_params):
+                        # THE CLOCK BELONGS HERE. Checking it only between
+                        # continuations meant one long call could run past
+                        # the gateway limit untouched - which is exactly
+                        # what was happening: ~300s of generation against a
+                        # ~120s cap, severed mid-word, no marker, every time.
+                        if _budget_left(_t0) <= 0:
+                            _deadline_hit = True
+                            break
+                        if _kind == "text":
+                            _chunk += _val
+                            yield f"data: {json.dumps({'type': 'text', 'text': _val})}\n\n"
+                        elif _kind == "search":
+                            print(
+                                f"  🔍 [WEB_SEARCH_AUDIT] "
+                                f"provider={llm.provider()} "
+                                f"user_query={user_query[:80]!r} "
+                                f"categories={fired_categories} "
+                                f"model_searched={_val!r}"
+                            )
+                        elif _kind == "stop":
+                            _stop = _val
                     _full += _chunk
                     if _deadline_hit:
                         # Stop cleanly on our own terms rather than waiting to be
@@ -1779,7 +1772,6 @@ def handle_query():
                         print(f"  [DEADLINE] {_budget_secs():.0f}s budget spent mid-generation "
                               f"after {len(_full):,} chars - closing cleanly")
                         break
-                    _stop = getattr(_final, "stop_reason", None)
                     if _stop not in CONTINUABLE_STOPS:
                         _truncated = False
                         break
@@ -1826,10 +1818,12 @@ def handle_query():
         _parts = []
         _round = 0
         _truncated = True
+        _searches_seen = []
         while True:
-            response = client.messages.create(**_params)
-            _parts.append("".join(b.text for b in response.content if hasattr(b, "text")))
-            _stop = getattr(response, "stop_reason", None)
+            response = llm.complete(_params)
+            _parts.append(response["text"])
+            _searches_seen.extend(response.get("searches") or [])
+            _stop = response["stop"]
             if _stop not in CONTINUABLE_STOPS:
                 _truncated = False
                 break
@@ -1844,20 +1838,15 @@ def handle_query():
 
         # Extract text from potentially mixed content blocks (text + web_search results)
         response_text = _continued_text
-        web_searches_made = []
-        for block in response.content:
-            # AUDIT LOG — Fix C (non-streaming variant)
-            btype = getattr(block, "type", "")
-            if btype == "server_tool_use" and getattr(block, "name", "") == "web_search":
-                search_input = getattr(block, "input", {}) or {}
-                search_query = search_input.get("query", "<unknown>")
-                web_searches_made.append(search_query)
-                print(
-                    f"  🔍 [WEB_SEARCH_AUDIT] "
-                    f"user_query={user_query[:80]!r} "
-                    f"categories={fired_categories} "
-                    f"claude_searched={search_query!r}"
-                )
+        web_searches_made = [q for q in _searches_seen if q]
+        for search_query in web_searches_made:
+            print(
+                f"  🔍 [WEB_SEARCH_AUDIT] "
+                f"provider={llm.provider()} "
+                f"user_query={user_query[:80]!r} "
+                f"categories={fired_categories} "
+                f"model_searched={search_query!r}"
+            )
 
         return jsonify({
             "response": response_text,
@@ -1876,7 +1865,11 @@ MAX_CONTINUATIONS = int(os.environ.get("MRI_MAX_CONTINUATIONS", "4"))
 # "pause_turn" on a long turn and expects the client to resume. Nothing handled
 # it, so the answer simply stopped - at ~2,900 tokens in the 20 Aug report,
 # nowhere near any max_tokens ceiling.
-CONTINUABLE_STOPS = ("max_tokens", "pause_turn")
+# Normalised by llm.py, so this vocabulary is provider-independent:
+#   Anthropic  max_tokens -> "length" | pause_turn -> "pause"
+#   OpenAI     incomplete_details.reason == max_tokens -> "length"
+#              (no pause equivalent; that branch simply never fires)
+CONTINUABLE_STOPS = ("length", "pause")
 
 PAUSE_INSTRUCTION = (
     "Continue the report from exactly where you stopped. Do not repeat anything "
@@ -1904,13 +1897,13 @@ TRUNCATION_MARKER = (
 )
 
 
-def _continuation_params(api_params, text_so_far, stop_reason="max_tokens"):
+def _continuation_params(api_params, text_so_far, stop_reason="length"):
     """Build the follow-up request that resumes an unfinished answer."""
     p = dict(api_params)
     # the API rejects an assistant turn with trailing whitespace
     p["messages"] = list(api_params["messages"]) + [
         {"role": "assistant", "content": text_so_far.rstrip()},
-        {"role": "user", "content": (PAUSE_INSTRUCTION if stop_reason == "pause_turn"
+        {"role": "user", "content": (PAUSE_INSTRUCTION if stop_reason == "pause"
                                      else CONTINUE_INSTRUCTION)},
     ]
     return p
@@ -2327,7 +2320,8 @@ def health():
     # A build marker so it is possible to tell WHICH app.py is running without
     # guessing from behaviour. Bump this string whenever app.py changes.
     status = {"status": "ok", "config": _CONFIG_OK,
-              "build": "2026-08-28-consistency",
+              "llm_provider": llm.provider(), "llm_model": llm.model_name(),
+              "build": "2026-08-29-llmshim",
               "async_generation": True}
     if _CONFIG_OK and NEO4J_PASSWORD:
         try:
