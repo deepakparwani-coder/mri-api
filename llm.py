@@ -49,9 +49,20 @@ _DEFAULT_MODEL = {
 
 
 def model_name() -> str:
-    return (os.environ.get("MRI_LLM_MODEL")
-            or os.environ.get("CLAUDE_MODEL")          # legacy env var
-            or _DEFAULT_MODEL.get(PROVIDER, ""))
+    explicit = os.environ.get("MRI_LLM_MODEL")
+    if explicit:
+        return explicit
+    if PROVIDER == "anthropic":
+        # CLAUDE_MODEL is the pre-shim env var and is still honoured - but ONLY
+        # for Anthropic. Reading it under any other provider would carry a
+        # Claude model id across the provider boundary and send
+        # "claude-sonnet-4-6" to the OpenAI Responses API, which answers 404
+        # model_not_found. A value that is valid on one side of a boundary is
+        # not a default for the other side.
+        legacy = os.environ.get("CLAUDE_MODEL")
+        if legacy:
+            return legacy
+    return _DEFAULT_MODEL.get(PROVIDER, "")
 
 
 def provider() -> str:
@@ -68,14 +79,24 @@ def get_client():
     if _client is not None:
         return _client
     if PROVIDER == "openai":
+        # Configuration is checked BEFORE the SDK is imported. A misconfigured
+        # model is a config error, and reporting it as an import error would
+        # send whoever reads the log after the wrong problem.
+        m = model_name()
+        if m.startswith("claude"):
+            # Fail here, in one clear line at boot, rather than as a 404 in the
+            # middle of a report the user is watching stream.
+            raise RuntimeError(
+                f"MRI_LLM_PROVIDER=openai but the model resolves to {m!r}. "
+                "Unset MRI_LLM_MODEL (or set it to an OpenAI model id).")
+        key = os.environ.get("OPENAI_API_KEY")
+        if not key:
+            raise RuntimeError("OPENAI_API_KEY is not set")
         try:
             from openai import OpenAI
         except ImportError:
             print("pip install openai", file=sys.stderr)
             raise
-        key = os.environ.get("OPENAI_API_KEY")
-        if not key:
-            raise RuntimeError("OPENAI_API_KEY is not set")
         _client = OpenAI(api_key=key)
     else:
         try:
