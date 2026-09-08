@@ -1903,6 +1903,12 @@ function go(){
     // full feasibility report takes ~300s to generate. Every poll below is a
     // sub-second request, so the gateway is never the constraint.
     function runAsyncQuery() {
+      // Neutral until the server says otherwise, so an older backend that does
+      // not send status_label degrades to an honest generic line rather than to
+      // a wrong specific one. Declared here, above poll(), rather than relying
+      // on var hoisting to make the reference inside poll() legal.
+      var statusLabel = "Reading the graph";
+
       var fullText = "", doneMeta = null, msgEl = null, bubble = null;
       var firstToken = true, cursor = 0, jobId = null, failures = 0;
       var t0 = Date.now();
@@ -1966,7 +1972,10 @@ function go(){
               return;
             }
             var secs = Math.round((Date.now() - t0) / 1000);
-            hint(firstToken ? ("Reading the graph and computing feasibility... " + secs + "s")
+            // The noun comes from the server, which knows what it actually
+            // fired. The old hardcoded "computing feasibility" was shown over
+            // every query, including price lookups that run no calculator.
+            hint(firstToken ? (statusLabel + "... " + secs + "s")
                             : ("Writing report... " + secs + "s"));
             setTimeout(poll, 1000);
           })
@@ -2000,7 +2009,8 @@ function go(){
       }).then(function(j) {
         if (!j) return;
         jobId = j.job_id;
-        hint("Reading the graph and computing feasibility...");
+        if (j.status_label) statusLabel = j.status_label;
+        hint(statusLabel + "...");
         poll();
       }).catch(function(e) {
         rtyp();

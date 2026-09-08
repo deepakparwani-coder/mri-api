@@ -419,6 +419,18 @@ def detect_corridor(query):
     return None
 
 
+# ONE definition of "this is a feasibility / site query". There were two, and
+# they had drifted: the web router recognised "due diligence" and "land
+# acquisition" while the token ceiling did not, so those queries got web context
+# and then a ceiling sized for a short answer. This is the union of both, and it
+# now feeds all three consumers - web routing, the token ceiling, and the
+# progress line the user reads.
+_FEASIBILITY_RE = re.compile(
+    r'feasib|plot.*area|acre|fsi|far\b|dcr|google.*map|goo\.gl|maps\.google'
+    r'|site.*intel|due.dilig|land.*acqui|appraisal',
+    re.IGNORECASE)
+
+
 def needs_web(query):
     """Detect if query needs web intelligence.
 
@@ -427,7 +439,7 @@ def needs_web(query):
     """
     q = query or ""
     # Always enable web for feasibility/site queries — they need location context
-    if re.search(r'feasib|plot.*area|acre|fsi|dcr|google.*map|goo\.gl|maps\.google|site.*intel|due.dilig|land.*acqui', q, re.IGNORECASE):
+    if _FEASIBILITY_RE.search(q):
         print(f"  🌐 [WEB_INTENT] feasibility-shortcut fired for: {q[:60]!r}")
         return True
     fired = classify_web_intent(q)
@@ -1701,7 +1713,7 @@ def handle_query():
     client = get_claude()
 
     # Feasibility queries need more tokens for comprehensive reports
-    is_feasibility = bool(re.search(r'feasib|plot.*area|acre|fsi|dcr|google.*map|site.*intel', user_query, re.IGNORECASE))
+    is_feasibility = describe_intent(user_query)["is_feasibility"]
     # A full feasibility report runs well past 8000 output tokens; at that
     # ceiling it stopped mid-table with no citation footer. Overridable.
     token_limit = int(os.environ.get("MRI_MAX_TOKENS_FEASIBILITY", "16000")) \
@@ -2039,6 +2051,46 @@ def _lf_price_and_velocity(data_results, want_carpet=False):
     return price, velocity, basis, quarter, detail
 
 
+# Ordered most-specific first; the first match wins. The progress line the user
+# watches is generated from this, so the label can never disagree with what the
+# server is actually doing - the frontend used to hardcode "computing
+# feasibility" and said it over a carpet-price lookup.
+_INTENT_LABELS = (
+    (_FEASIBILITY_RE,                                     True,
+     "Running the feasibility appraisal"),
+    (re.compile(r'\bcarpet\b|rera[\s-]*(?:basis|carpet|area)', re.I), False,
+     "Reading the carpet-basis series"),
+    (re.compile(r'-?\d{1,2}\.\d{3,}\s*,\s*-?\d{1,3}\.\d{3,}|maps\.(?:app\.)?goo', re.I), False,
+     "Resolving the pin and ranking nearby projects"),
+    (re.compile(r'\bnear(?:by|est)?\b|\bvicinity\b|\bwithin\b.*\bkm\b|\bcatchment\b', re.I), False,
+     "Ranking projects by distance"),
+    (re.compile(r'\bvelocit|\babsorption\b|\binventory\b|\bunsold\b', re.I), False,
+     "Reading absorption and inventory"),
+    (re.compile(r'\bprice\b|\bpsf\b|\brate\b|\btrend\b', re.I), False,
+     "Reading the price series"),
+    (re.compile(r'\bcompar|\bbenchmark|\bversus\b|\bvs\.?\b', re.I), False,
+     "Comparing projects"),
+    (re.compile(r'\brank\b|\btop\s*\d+\b|\bbest\b|\bdemand\b', re.I), False,
+     "Ranking the market"),
+)
+
+
+def describe_intent(user_query):
+    """One source of truth for 'what is this query'.
+
+    Returns {"is_feasibility": bool, "label": str}. Both the token ceiling and
+    the progress line the user reads are derived from this, so they cannot drift
+    apart. A label that is guessed independently by the frontend is the same
+    class of bug as a price read by column position: it is a claim about the
+    data made without consulting the data.
+    """
+    q = user_query or ""
+    for pattern, feas, label in _INTENT_LABELS:
+        if pattern.search(q):
+            return {"is_feasibility": feas, "label": label}
+    return {"is_feasibility": False, "label": "Reading the graph"}
+
+
 def build_feasibility_block(user_query, data_results):
     """Return (markdown_block, diagnostic) - block is None when not applicable."""
     if not _FEAS_OK:
@@ -2250,9 +2302,15 @@ def start_query_job():
                          "created": _time.time(), "updated": _time.time()}
     _threading.Thread(target=_run_job, args=(job_id, body), daemon=True).start()
     print(f"  [ASYNC] job {job_id[:8]} started: {body.get('query', '')[:70]!r}")
+    intent = describe_intent(body.get('query', ''))
     return jsonify({"job_id": job_id,
                     "poll": f"/api/query/result/{job_id}",
-                    "budget_secs": ASYNC_BUDGET_SECS}), 202
+                    "budget_secs": ASYNC_BUDGET_SECS,
+                    # The client shows this verbatim. It is computed from the
+                    # same function that sets the token ceiling, so the progress
+                    # line and the server's actual behaviour cannot disagree.
+                    "status_label": intent["label"],
+                    "is_feasibility": intent["is_feasibility"]}), 202
 
 
 @app.route('/api/query/result/<job_id>', methods=['GET'])
@@ -2336,7 +2394,7 @@ def health():
     status = {"status": "ok", "config": _CONFIG_OK,
               "llm_provider": llm.provider(), "llm_model": llm.model_name(),
               "llm_reasoning": llm.reasoning_effort(),
-              "build": "2026-08-29-llmshim",
+              "build": "2026-09-08-intentlabel",
               "async_generation": True}
     if _CONFIG_OK and NEO4J_PASSWORD:
         try:
