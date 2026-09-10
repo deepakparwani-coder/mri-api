@@ -1732,8 +1732,126 @@ function renderAttBar() {
 }
 
 function ask(q){qi.value=q;go();}
+// ── The qualifier ──────────────────────────────────────────────────────────
+// Shown before EVERY feasibility appraisal, not only when one is blocked. The
+// point is not to collect inputs - most are already known - it is that a
+// developer betting nine figures can see which numbers the report chose for
+// him. FSI 2.5 was applied silently to a plot sanctioned at 3.0, and nothing on
+// screen made that visible until the room did.
+var PENDING_OVERRIDES = null;   // consumed once, by the next query
+var QUAL_DONE = false;          // set when the form has been answered
+var QUAL_STATUS_STYLE = {
+  MISSING:  "background:#FEE2E2;color:#991B1B",
+  DEFAULT:  "background:#FEF3C7;color:#92400E",
+  DERIVED:  "background:#DBEAFE;color:#1E40AF",
+  SUPPLIED: "background:#DCFCE7;color:#166534"
+};
+var QUAL_GROUP_TITLE = {
+  site:     "Site — drives the competition set, not the arithmetic",
+  required: "Required — the appraisal cannot run without these",
+  derived:  "Read from Liases Foras data — override only if you disagree",
+  assumed:  "Assumptions the engine will make — confirm or correct"
+};
+
+function qualCell(f){
+  var st = String(f.status || "").toUpperCase();
+  var val = (f.value === null || f.value === undefined) ? "" : f.value;
+  var ph = (f.status === "missing") ? "required" : String(val);
+  return '<div style="margin:0 0 10px 0">'
+    + '<label style="display:block;font-size:11px;font-weight:600;color:#3A3630;margin-bottom:3px">'
+    + esc(f.label)
+    + (f.unit ? ' <span style="font-weight:400;color:#8C8578">(' + esc(f.unit) + ')</span>' : '')
+    + ' <span style="float:right;font-size:9px;font-weight:700;border-radius:3px;padding:1px 5px;'
+    + (QUAL_STATUS_STYLE[st] || "") + '">' + esc(st) + '</span></label>'
+    + '<input id="qf_' + esc(f.key) + '" data-qk="' + esc(f.key) + '" '
+    + 'type="' + (f.kind === "number" ? "text" : "text") + '" '
+    + 'placeholder="' + esc(ph) + '" '
+    + 'style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid '
+    + (f.status === "missing" ? "#DC2626" : "#E5E0D5")
+    + ';border-radius:5px;font-family:inherit;font-size:12px">'
+    + '<div style="font-size:10px;color:#8C8578;margin-top:2px">' + esc(f.source || "")
+    + (f.help ? ' — ' + esc(f.help) : '') + '</div>'
+    + '</div>';
+}
+
+function renderQualifier(q, spec){
+  var groups = ["site", "required", "derived", "assumed"];
+  var h = '<div style="font-weight:700;font-size:14px;margin-bottom:2px">Before I run this appraisal</div>'
+    + '<div style="font-size:12px;color:#5C564C;margin-bottom:12px">Every figure below will be used. '
+    + 'Fill in what you know and leave the rest — nothing here is mandatory except the fields marked '
+    + '<span style="font-weight:600;color:#991B1B">MISSING</span>, and skipping those means the appraisal '
+    + 'will state what it could not compute rather than guess.</div>'
+    + (spec.authority
+        ? '<div style="font-size:11px;color:#5C564C;background:#F6F3EA;border:1px solid #E5E0D5;'
+          + 'border-radius:6px;padding:7px 10px;margin-bottom:10px">Planning authority read as '
+          + '<strong>' + esc(spec.authority) + '</strong> — figures marked DERIVED below come '
+          + 'from filed K-RERA medians for that authority, not from a default.</div>'
+        : '');
+  groups.forEach(function(g){
+    var fs = spec.fields.filter(function(f){ return f.group === g; });
+    if (!fs.length) return;
+    h += '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;'
+      + 'color:#8C8578;margin:14px 0 8px;border-top:1px solid #EDE8DC;padding-top:10px">'
+      + esc(QUAL_GROUP_TITLE[g] || g) + '</div>'
+      + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:0 14px">'
+      + fs.map(qualCell).join("") + '</div>';
+  });
+  h += '<div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">'
+    + '<button onclick="qualSubmit(false)" style="background:linear-gradient(135deg,#C9A84C,#B8963E);'
+    + 'color:#fff;border:none;border-radius:6px;padding:9px 20px;font-family:inherit;font-size:12px;'
+    + 'font-weight:600;cursor:pointer">Run the appraisal</button>'
+    + '<button onclick="qualSubmit(true)" style="background:#fff;color:#5C564C;border:1px solid #E5E0D5;'
+    + 'border-radius:6px;padding:9px 20px;font-family:inherit;font-size:12px;cursor:pointer">'
+    + 'Skip all — use defaults</button></div>';
+  QUAL_PENDING_Q = q;
+  ab("b", h, true);
+  busy = false; sbtn.disabled = false;
+}
+
+var QUAL_PENDING_Q = "";
+
+function qualSubmit(skipAll){
+  var ov = {};
+  if (!skipAll) {
+    var els = document.querySelectorAll("[data-qk]");
+    for (var i = 0; i < els.length; i++) {
+      var v = (els[i].value || "").trim();
+      // Blank is a SKIP, never a zero. The engine keeps its default and the
+      // report keeps calling it a default.
+      if (v !== "") ov[els[i].getAttribute("data-qk")] = v;
+    }
+  }
+  PENDING_OVERRIDES = Object.keys(ov).length ? ov : null;
+  QUAL_DONE = true;
+  var els2 = document.querySelectorAll("[data-qk]");
+  for (var j = 0; j < els2.length; j++) els2[j].disabled = true;
+  qi.value = QUAL_PENDING_Q;
+  go();
+}
+
 function go(){
-  var q=qi.value.trim();if((!q && !pendingAtt.length)||busy||!API_KEY)return;
+  var q=qi.value.trim();
+  if((!q && !pendingAtt.length)||busy||!API_KEY)return;
+  // Ask the SERVER whether this query needs the qualifier. The field
+  // list is generated from the calculator's own input contract, so the
+  // form can never ask for a different set than the engine reads.
+  if (USE_BACKEND !== false && !QUAL_DONE) {
+    busy = true; sbtn.disabled = true;
+    fetch(API_BASE + "/api/feasibility/qualify", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({query: q, city: CC})
+    }).then(function(r){ return r.ok ? r.json() : null; })
+     .then(function(j){
+       if (j && j.applicable && j.fields && j.fields.length) { renderQualifier(q, j); }
+       else { QUAL_DONE = true; qi.value = q; busy = false; sbtn.disabled = false; go(); }
+     })
+     .catch(function(){
+       // An older backend has no qualifier endpoint. Run the query.
+       QUAL_DONE = true; qi.value = q; busy = false; sbtn.disabled = false; go();
+     });
+    return;
+  }
+  QUAL_DONE = false;
   qi.value="";qi.style.height="auto";busy=true;sbtn.disabled=true;
   
   // Build user display text
@@ -1997,7 +2115,11 @@ function go(){
         body: JSON.stringify({
           query: q || "Analyse the attached data",
           city: CC,
-          history: hist.slice(-8)
+          history: hist.slice(-8),
+          // Consumed once. Left on the client it would silently apply to the
+          // NEXT query too, which is how a confirmed FSI for one plot ends up
+          // appraising a different one.
+          overrides: (function(){ var o = PENDING_OVERRIDES; PENDING_OVERRIDES = null; return o; })()
         })
       }).then(function(r) {
         // Backend not redeployed yet - use the old path rather than failing.

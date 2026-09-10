@@ -62,11 +62,30 @@ class FeasibilityInputs:
 
     fsi: float = 2.0
     fsi_assumed: bool = True
+    fsi_authority: Optional[str] = None    # who sanctioned it, under what instrument
+    site_pin: Optional[str] = None         # lat,lng or Maps link, for the benchmark set
 
     # deductions from gross plot before FSI is applied
     deduction_pct: float = 15.0        # ROS + road surrender etc.
-    efficiency_pct: float = 70.0       # saleable / BUA  (freehold default)
-    carpet_factor: float = 0.74        # RERA carpet / saleable
+
+    # ── The area chain, calibrated against 1,947 filed K-RERA projects ───────
+    # Every one of these was previously a guess, and two were wrong:
+    #
+    #   was: bua      = net x FSI            (FSI area, and the ONLY area costed)
+    #        saleable = bua x 70%            (made saleable SMALLER than FSI area)
+    #        carpet   = saleable x 0.74      (=> carpet 0.518 x FSI area)
+    #
+    #   filed reality (median, n~1,930):
+    #        construction area = FSI area x 1.35   parking/basements/services
+    #        carpet            = FSI area x 0.80
+    #        saleable          = FSI area x ~1.07  (carpet / carpet_factor)
+    #
+    # Construction was understated ~29%, carpet ~34%, saleable and revenue ~35%.
+    # See rera_calibration.json and the project note for the distributions.
+    non_fsi_pct: float = 135.0         # construction area as % of FSI area
+    loading_pct: float = 107.0         # saleable as % of FSI area  (was "efficiency")
+    carpet_factor: float = 0.73        # RERA carpet / saleable; DERIVE per market
+    carpet_factor_source: str = "engine default"
     avg_unit_sqft: float = 950.0
 
     land_cost_cr: Optional[float] = None
@@ -107,6 +126,12 @@ class FeasibilityInputs:
 
     notes: list = field(default_factory=list)
 
+    # Keys the USER explicitly confirmed through the qualifier. Everything not
+    # in this list that differs from nothing is either read from LF data or a
+    # default - and the report must say which. An assumption the reader cannot
+    # see is the whole reason a plot sanctioned at FAR 3.0 was appraised at 2.5.
+    user_confirmed: list = field(default_factory=list)
+
     def is_sufficient(self) -> bool:
         """Enough to produce economics. Price may come from LF data later."""
         return self.plot_sqft is not None and self.construction_psf is not None
@@ -118,6 +143,365 @@ class FeasibilityInputs:
         if self.price_psf is None: m.append("selling price PSF (can come from LF data)")
         if self.land_cost_cr is None: m.append("land cost (optional - drives max-viable-land instead)")
         return m
+
+
+# ── Filed calibration ────────────────────────────────────────────────────────
+# rera_calibration.json is generated from 1,947 Karnataka RERA projects that
+# filed land area, sanctioned FAR, built-up area, carpet area and CA-certified
+# construction cost together. It replaces four numbers that used to be my
+# opinion. Absent the file the engine keeps its defaults and says so - it never
+# silently falls back to a guess dressed as evidence.
+import json as _json
+import os as _os
+
+_CALIB = None
+
+
+def calibration():
+    global _CALIB
+    if _CALIB is None:
+        path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                             "rera_calibration.json")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                _CALIB = _json.load(fh)
+        except Exception:
+            _CALIB = {}
+    return _CALIB
+
+
+_IN_KARNATAKA_RE = re.compile(
+    r"karnataka|bengaluru|bangalore|mysuru|mysore|mangaluru|mangalore|"
+    r"hubballi|dharwad|belagavi|belgaum|udupi|tumakuru|tumkur", re.IGNORECASE)
+
+_AUTHORITY_ALIASES = (
+    ("BBMP", ("bbmp", "bruhat", "greater bengaluru", "gba")),
+    ("BDA", ("bda", "bangalore development", "bengaluru development")),
+    ("BMRDA", ("bmrda", "metropolitan region")),
+    ("MUDA", ("muda", "mangaluru urban", "mysuru urban")),
+    ("LPA", ("local planning", "local planing", "lpa", "panchayat")),
+)
+
+
+def authority_key(text):
+    """Map free text ('GBA/BBMP', 'KARNATAKA_BBMP', 'BDA - Bangalore...') to a
+    calibration key. Returns None when nothing matches - which is an answer,
+    not a reason to pick the biggest bucket."""
+    t = (text or "").lower()
+    for key, needles in _AUTHORITY_ALIASES:
+        if any(n in t for n in needles):
+            return key
+    return None
+
+
+def calibrated(metric, authority=None):
+    """Return (value, citation) for a calibrated metric, or (None, None).
+
+    metric: far_sanctioned | non_fsi_factor | carpet_over_fsi | carpet_over_bua
+            | ground_coverage | construction_psf_bua
+    """
+    c = calibration()
+    if not c:
+        return None, None
+    # This calibration is KARNATAKA. Handing a Karnataka median to a Pune or
+    # Gurugram plot because no better bucket matched is the same substitution
+    # this whole exercise exists to remove, so an authority we cannot place
+    # returns nothing at all.
+    key = authority_key(authority) if authority else None
+    if key:
+        node = c.get("authorities", {}).get(key) or c.get("overall")
+        where = key
+    elif authority and _IN_KARNATAKA_RE.search(authority):
+        node, where = c.get("overall"), "all Karnataka"
+    else:
+        return None, None
+    if not node or metric not in node:
+        return None, None
+    b = node[metric]
+    return b["median"], (f"K-RERA filed median for {where}, n={b['n']} "
+                         f"(p25 {b['p25']} - p75 {b['p75']})")
+
+
+def apply_calibration(inp, authority=None):
+    """Set FSI and the area factors from filed data where the user has not.
+
+    Only fields the user did NOT confirm are touched, and each one that is set
+    records where it came from, so the report can distinguish a filed median
+    from an engine default.
+    """
+    conf = getattr(inp, "user_confirmed", None) or []
+    notes = []
+    far, cite = calibrated("far_sanctioned", authority)
+    if far and inp.fsi_assumed and "fsi" not in conf:
+        inp.fsi = far
+        inp.fsi_assumed = False
+        if not inp.fsi_authority:
+            inp.fsi_authority = cite
+        notes.append(f"FSI {far} from {cite}")
+    nf, cite = calibrated("non_fsi_factor", authority)
+    if nf and "non_fsi_pct" not in conf:
+        inp.non_fsi_pct = round(nf * 100, 1)
+        notes.append(f"construction area {inp.non_fsi_pct}% of FSI area from {cite}")
+    cf, cite = calibrated("carpet_over_fsi", authority)
+    if cf and "loading_pct" not in conf and inp.carpet_factor:
+        # saleable = carpet / carpet_factor, and carpet is filed against FSI area
+        inp.loading_pct = round(cf / inp.carpet_factor * 100, 1)
+        notes.append(f"loading {inp.loading_pct}% derived from {cite} "
+                     f"and carpet factor {inp.carpet_factor}")
+    inp.notes.extend(notes)
+    return inp
+
+
+# ── The qualifier ────────────────────────────────────────────────────────────
+# Every feasibility report rests on ~18 numbers. Two of them block the
+# calculation; the rest have defaults that were, until now, applied in silence.
+# One of those silent defaults - FSI 2.0 against a plot sanctioned at 3.0 - is
+# what made a live demo collapse. So the qualifier shows ALL of them, every
+# time, marked by where each value came from.
+#
+# This spec is deliberately adjacent to the dataclass above. Every `key` here
+# must be a real field on FeasibilityInputs, and every entry `missing()` can
+# return must appear here as required. Both are asserted in the tests, because a
+# form that asks for a different set than the calculator reads would be a new
+# way to fail, invented by the fix.
+
+GROUP_SITE = "site"            # absent -> the BENCHMARK is weaker, not the maths
+GROUP_REQUIRED = "required"    # absent -> the calculator abstains
+GROUP_DERIVED = "derived"      # comes from LF data; overridable
+GROUP_ASSUMED = "assumed"      # has a default; applied silently until now
+
+
+@dataclass
+class QualField:
+    key: str
+    label: str
+    group: str
+    unit: str
+    help: str
+    kind: str = "number"           # number | text | area
+
+
+QUALIFIER_FIELDS = [
+    # ── the site: blocks the BENCHMARK, not the arithmetic ──
+    QualField("site_pin", "Site pin", GROUP_SITE, "lat, lng or Maps link",
+              "Drives the distance-ranked competition set, the catchment and "
+              "the planning authority. Skip it and the report says plainly that "
+              "the benchmark is micromarket-level and NOT distance-ranked.",
+              kind="text"),
+
+    # ── blocks the calculation ──
+    QualField("plot_sqft", "Plot area", GROUP_REQUIRED, "acres",
+              "Type a number and it is read as ACRES. Write the unit for "
+              "anything else - '21780 sqft', '2 hectare', '40 guntha', "
+              "'12 cent', '2000 sqm'.", kind="area"),
+    QualField("construction_psf", "Construction cost", GROUP_REQUIRED,
+              "Rs. per sq.ft of BUA",
+              "PER SQ.FT OF BUILT-UP AREA, not saleable. At 70% efficiency "
+              "these differ by about 43%, so the wrong basis moves the margin "
+              "more than any market assumption in this list."),
+
+    # ── read from LF; the user may override ──
+    QualField("price_psf", "Selling price", GROUP_DERIVED, "Rs. PSF",
+              "Target average realisation. Left blank, the latest LF quarter "
+              "for this micromarket is used and its vintage is printed."),
+    QualField("monthly_velocity_pct", "Sales velocity", GROUP_DERIVED,
+              "% per month",
+              "Left blank, taken from the LF absorption series."),
+
+    # ── silent defaults, now visible ──
+    QualField("fsi", "FSI / FAR", GROUP_ASSUMED, "",
+              "The single highest-impact number here. Enter the SANCTIONED "
+              "figure including any premium FAR or TDR loaded onto the plot - "
+              "not the base zoning FSI."),
+    QualField("fsi_authority", "FSI authority / basis", GROUP_ASSUMED, "",
+              "Who sanctioned it, under what instrument (e.g. 'GBA, premium "
+              "FAR on a 60ft road, notified Jan 2026'). Printed in the report "
+              "as the authority for the figure above.", kind="text"),
+    QualField("land_cost_cr", "Land cost", GROUP_ASSUMED, "Rs. Cr (total)",
+              "Leave blank and the report solves for the MAXIMUM viable land "
+              "cost instead of testing one."),
+    QualField("deduction_pct", "Plot deductions", GROUP_ASSUMED, "%",
+              "Open space, road surrender and similar, taken off gross plot "
+              "before FSI is applied."),
+    QualField("non_fsi_pct", "Construction area", GROUP_ASSUMED,
+              "% of FSI area",
+              "Everything you build that does NOT count against FAR - parking, "
+              "basements, podium, services. Filed K-RERA median is 135% "
+              "(BBMP 140%). This is the area the construction rate is applied "
+              "to; the FSI area alone understates it by about 29%."),
+    QualField("loading_pct", "Loading factor", GROUP_ASSUMED,
+              "% of FSI area",
+              "Marketed saleable area as a share of FSI area. Normally ABOVE "
+              "100% - loading makes what you sell larger than what FAR permits. "
+              "Calibrated at 107% from filed carpet areas."),
+    QualField("carpet_factor", "Carpet factor", GROUP_ASSUMED, "ratio",
+              "RERA carpet / saleable. Derived per market from the LF carpet "
+              "and saleable series when both are present. Used for reporting "
+              "only - it NEVER converts a price."),
+    QualField("avg_unit_sqft", "Average unit size", GROUP_ASSUMED, "sq.ft",
+              "Drives unit count and therefore the phasing ladder."),
+    QualField("project_years", "Build / sell-out period", GROUP_ASSUMED, "years",
+              "Drives the cash flow and the IRR."),
+    QualField("target_margin_pct", "Target margin", GROUP_ASSUMED, "%",
+              "The bar the verdict is judged against."),
+    QualField("approval_pct", "Approvals", GROUP_ASSUMED, "% of construction", ""),
+    QualField("professional_pct", "Professional fees", GROUP_ASSUMED,
+              "% of construction", ""),
+    QualField("marketing_pct", "Marketing", GROUP_ASSUMED, "% of revenue",
+              "Zero in the base case: it is a developer decision, not an "
+              "industry default."),
+    QualField("contingency_pct", "Contingency", GROUP_ASSUMED,
+              "% of construction + approvals", ""),
+    QualField("finance_rate_pct", "Finance rate", GROUP_ASSUMED, "% p.a.", ""),
+    QualField("finance_drawn_pct", "Share financed", GROUP_ASSUMED,
+              "% of construction", ""),
+    QualField("booking_collect_pct", "Collected at booking", GROUP_ASSUMED, "%",
+              "RERA s.13(1) caps pre-agreement collection at 10% of "
+              "apartment cost."),
+    QualField("possession_collect_pct", "Collected at possession", GROUP_ASSUMED,
+              "%", "The remainder accrues pro-rata to construction progress."),
+]
+
+# Free-text field that is not a computation input; carried through to the report.
+_TEXT_ONLY_KEYS = {"fsi_authority", "site_pin"}
+
+_QUAL_BY_KEY = {f.key: f for f in QUALIFIER_FIELDS}
+
+
+def qualifier_spec(inp=None, lf_price=None, lf_price_source="",
+                   lf_velocity=None):
+    """Describe every input, with its current value and where that value is from.
+
+    status is one of:
+        supplied  - the user wrote it in the query, or confirmed it here
+        derived   - read from LF data (source is named)
+        default   - the engine's default, applied silently until now
+        missing   - required and absent; the calculator will abstain
+    """
+    base = FeasibilityInputs()
+    out = []
+    for f in QUALIFIER_FIELDS:
+        default = None if f.key in _TEXT_ONLY_KEYS else getattr(base, f.key, None)
+        value = default
+        status, source = "default", "engine default"
+
+        if inp is not None:
+            cur = getattr(inp, f.key, None)
+            confirmed = f.key in (getattr(inp, "user_confirmed", None) or [])
+            if f.key == "price_psf" and cur is None and lf_price:
+                value, status, source = lf_price, "derived", (lf_price_source or "LF data")
+            elif f.key == "monthly_velocity_pct" and cur is None and lf_velocity:
+                value, status, source = lf_velocity, "derived", "LF absorption series"
+            elif cur is not None and (confirmed or cur != default):
+                value, status, source = cur, "supplied", (
+                    "confirmed by you" if confirmed else "read from your question")
+            elif cur is not None:
+                value = cur
+
+        # FSI carries its own explicit flag, older than this spec. Honour it.
+        if f.key == "fsi" and inp is not None and getattr(inp, "fsi_assumed", True) is False:
+            status = "supplied"
+            source = ("confirmed by you" if "fsi" in (getattr(inp, "user_confirmed", None) or [])
+                      else "read from your question")
+
+        if f.group == GROUP_REQUIRED and value is None:
+            status, source = "missing", "not supplied - the appraisal cannot run without it"
+        elif f.group == GROUP_DERIVED and value is None:
+            status, source = "missing", "no LF value retrieved"
+        elif value is None and status == "default":
+            # An assumed field whose default is itself "nothing" - land cost and
+            # the FSI authority. Saying "engine default" here would imply a
+            # number was applied when none was.
+            source = ("blank - the report solves for the maximum viable land cost"
+                      if f.key == "land_cost_cr" else "not stated")
+
+        out.append({"key": f.key, "label": f.label, "group": f.group,
+                    "unit": f.unit, "help": f.help, "kind": f.kind,
+                    "value": value, "default": default,
+                    "status": status, "source": source})
+    return {"fields": out}
+
+
+def apply_overrides(inp, overrides):
+    """Merge user-confirmed values onto parsed inputs. Returns the input object.
+
+    A blank or absent value is a SKIP, never a zero. The distinction matters:
+    skipping a required field must still make the calculator abstain, and
+    skipping an assumed field must leave the default in place AND leave it
+    marked as a default in the report.
+    """
+    if not overrides:
+        return inp
+    for key, raw in (overrides or {}).items():
+        f = _QUAL_BY_KEY.get(key)
+        if f is None:
+            continue                      # ignore anything not in the spec
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            continue                      # a skip, not a zero
+        if f.kind == "text":
+            setattr(inp, key, str(raw).strip())
+        elif f.kind == "area":
+            sqft = _text_to_sqft(raw)
+            if sqft is None:
+                continue
+            setattr(inp, key, sqft)
+            inp.plot_input_text = str(raw).strip()
+        else:
+            try:
+                setattr(inp, key, _f(raw))
+            except (TypeError, ValueError):
+                continue
+        if key not in inp.user_confirmed:
+            inp.user_confirmed.append(key)
+        if key == "fsi":
+            inp.fsi_assumed = False
+    return inp
+
+
+def _text_to_sqft(raw):
+    """'5 acre' / '21780 sqft' / '2 ha' / bare number.
+
+    A BARE NUMBER IS ACRES. Indian land is quoted in acres and gunthas, and the
+    field says so; reading "5" as five square feet would be absurd, while
+    reading it as five acres is what the user meant. Any other unit must be
+    written out.
+    """
+    t = str(raw).strip().lower()
+    m = re.match(r"^\s*" + _NUM + r"\s*([a-z.\s]*)$", t)
+    if not m:
+        return None
+    val, unit = _f(m.group(1)), (m.group(2) or "").strip().replace(".", "")
+    if not unit:
+        return val * SQFT_PER_ACRE
+    if unit in ("sqft", "sq ft", "sqfeet", "sq feet", "ft2", "sft", "sqfoot"):
+        return val
+    converted = _area_to_sqft(val, unit)
+    return converted if converted is not None else None
+
+
+def confirmation_summary(inp):
+    """Markdown the model MUST reproduce: every figure and where it came from."""
+    spec = qualifier_spec(inp)["fields"]
+    rows = []
+    for f in spec:
+        v = f["value"]
+        if v is None:
+            shown = "—"
+        elif f["key"] == "plot_sqft":
+            # %g turned 217800 into "2.178e+05". A developer reading his own
+            # plot area in scientific notation has been given a reason to
+            # distrust every number under it.
+            acres = v / SQFT_PER_ACRE
+            shown = (f"{v:,.0f} sq.ft" if acres < 0.5
+                     else f"{v:,.0f} sq.ft ({acres:,.2f} acre)")
+        elif isinstance(v, float):
+            shown = f"{v:,.0f}" if abs(v - round(v)) < 1e-9 else f"{v:,.2f}"
+        else:
+            shown = str(v)
+        rows.append(f"| {f['label']} | {shown}{(' ' + f['unit']) if f['unit'] else ''} "
+                    f"| {f['status'].upper()} | {f['source']} |")
+    return ("| Input | Value | Status | Basis |\n"
+            "|---|---|---|---|\n" + "\n".join(rows))
 
 
 # ── Parsing ──────────────────────────────────────────────────────────────────
@@ -153,6 +537,15 @@ def parse_feasibility_inputs(text: str) -> Optional[FeasibilityInputs]:
         return None
     t = text.replace('–', '-').replace('—', '-')
     low = t.lower()
+    # Several patterns below use [^.] to stop at a sentence boundary. "Rs." has
+    # a full stop in it, so "land cost Rs.45 Cr" - the most natural way an
+    # Indian developer writes it - failed to parse and the land cost silently
+    # became None. The report then solved for maximum viable land instead of
+    # testing the price the user actually asked about, and said nothing.
+    # The currency marker carries no meaning for the parser, so it is removed
+    # before matching rather than every pattern being taught about it.
+    low = re.sub(r'\brs\.\s*', 'rs ', low)
+    low = low.replace('₹', 'rs ')
     if not re.search(r'feasib|viab|irr|margin|acre|guntha|hectare|plot|land cost|acquisition', low):
         return None
 
@@ -192,10 +585,32 @@ def parse_feasibility_inputs(text: str) -> Optional[FeasibilityInputs]:
         inp.price_psf = _f(m.group(1)); inp.price_psf_source = "user supplied"
 
     # ── efficiency / tenure hints ──
-    if re.search(r'\bsra\b', low): inp.efficiency_pct = 55.0; inp.notes.append("SRA tenure -> 55% efficiency")
-    elif re.search(r'mhada', low): inp.efficiency_pct = 65.0; inp.notes.append("MHADA tenure -> 65% efficiency")
+    # SRA and MHADA carried tenure-specific "efficiency" figures written under
+    # the old, inverted convention (saleable as a fraction of FSI area). They
+    # cannot be mechanically restated as a loading factor, and inventing a
+    # conversion would be exactly the substitution this rewrite removes. They
+    # are recorded as an unresolved flag instead of a wrong number.
+    if re.search(r'\bsra\b', low):
+        inp.notes.append("SRA tenure detected - tenure-specific loading is NOT "
+                         "calibrated; the freehold loading factor is in use")
+    elif re.search(r'mhada', low):
+        inp.notes.append("MHADA tenure detected - tenure-specific loading is NOT "
+                         "calibrated; the freehold loading factor is in use")
+    # "efficiency 70%" in a query meant saleable-as-a-share-of-FSI-area under the
+    # old convention. Reading it into loading_pct would silently halve the
+    # saleable area, so it is captured as a note and NOT applied. Use the
+    # qualifier's Loading factor field to set it deliberately.
     m = re.search(r'efficien\w*[^.]{0,20}?' + _NUM + r'\s*%', low)
-    if m: inp.efficiency_pct = _f(m.group(1))
+    if m:
+        inp.notes.append(
+            f"query stated efficiency {_f(m.group(1)):.0f}% - NOT applied: the "
+            f"engine now uses a loading factor (saleable / FSI area, calibrated "
+            f"at {FeasibilityInputs.loading_pct:.0f}%). Set it in the qualifier "
+            f"if you meant to override it.")
+
+    m = re.search(r'loading[^.]{0,20}?' + _NUM + r'\s*%', low)
+    if m:
+        inp.loading_pct = _f(m.group(1))
 
     # ── timeline ──
     m = re.search(_NUM + r'\s*(?:-|\s)?\s*year', low)
@@ -261,14 +676,21 @@ def compute(inp: FeasibilityInputs) -> dict:
 
     gross = inp.plot_sqft
     net = gross * (1 - inp.deduction_pct / 100.0)
-    bua = net * inp.fsi
-    saleable = bua * inp.efficiency_pct / 100.0
+    # FSI area is what the AUTHORITY permits. It is not what you build, and it
+    # is not what you sell - those are the next two lines, and conflating them
+    # was the single largest error in this engine.
+    fsi_area = net * inp.fsi
+    construction_area = fsi_area * inp.non_fsi_pct / 100.0   # + parking, basements
+    saleable = fsi_area * inp.loading_pct / 100.0            # marketed super built-up
     carpet = saleable * inp.carpet_factor
     units = saleable / inp.avg_unit_sqft
 
     revenue_cr = saleable * price / CR
     land_cr = inp.land_cost_cr if inp.land_cost_cr is not None else 0.0
-    costs = _cost_stack(inp, bua, revenue_cr, land_cr)
+    # construction_psf is quoted PER SQ.FT OF BUILT-UP AREA (all floors) - the
+    # filed K-RERA median on that basis is Rs.2,705. Costing the FSI area
+    # instead understated construction by ~29%.
+    costs = _cost_stack(inp, construction_area, revenue_cr, land_cr)
 
     profit_cr = revenue_cr - costs["total_cr"]
     margin_rev = profit_cr / revenue_cr * 100.0 if revenue_cr else 0.0
@@ -291,7 +713,7 @@ def compute(inp: FeasibilityInputs) -> dict:
         row = {"land_cr": lc, "cells": []}
         for p in price_axis:
             rev = saleable * p / CR
-            cs = _cost_stack(inp, bua, rev, lc)
+            cs = _cost_stack(inp, construction_area, rev, lc)
             pr = rev - cs["total_cr"]
             row["cells"].append({"price_psf": p,
                                  "margin_pct": round(pr / rev * 100.0, 1) if rev else 0.0,
@@ -354,7 +776,14 @@ def compute(inp: FeasibilityInputs) -> dict:
     equity = land_cr + costs["approvals_cr"] + max(0.0, -min(r["cumulative_cr"] for r in table))
     return dict(
         inputs=asdict(inp),
-        areas=dict(gross_sqft=round(gross), net_sqft=round(net), bua_sqft=round(bua),
+        # There is deliberately NO "bua_sqft" key. It was kept briefly as an
+        # alias of fsi_area_sqft and the downside case promptly read it, costed
+        # the permitted area instead of the built area, and reported a downside
+        # margin BETTER than the base case. A name that means two things is how
+        # this class of bug keeps coming back; both areas are now named.
+        areas=dict(gross_sqft=round(gross), net_sqft=round(net),
+                   fsi_area_sqft=round(fsi_area),
+                   construction_area_sqft=round(construction_area),
                    saleable_sqft=round(saleable), carpet_sqft=round(carpet),
                    units=round(units)),
         revenue_cr=round(revenue_cr, 2), price_psf=price,
@@ -540,7 +969,8 @@ def compute_launch_plan(inp: FeasibilityInputs, base_result: dict) -> dict:
     down_f, down_rev, down_fin = _flows(down_prices, shares, years)
     down_realised = prices[0]
     c = base_result["costs"]
-    down_cost = _cost_stack(inp, base_result["areas"]["bua_sqft"], down_rev, c["land_cr"])
+    down_cost = _cost_stack(inp, base_result["areas"]["construction_area_sqft"],
+                            down_rev, c["land_cr"])
     downside = dict(label="Escalation not achieved - all phases near launch price",
                     realised_psf=round(down_realised),
                     revenue_cr=round(down_rev, 2),
@@ -589,7 +1019,7 @@ def render_markdown(r: dict) -> str:
     L.append("")
     L.append(f"**Inputs used** - plot {i['plot_input_text'] or str(i['plot_sqft'])+' sqft'}, "
              f"FSI {i['fsi']}{' (assumed)' if i['fsi_assumed'] else ''}, "
-             f"deductions {i['deduction_pct']}%, efficiency {i['efficiency_pct']}%, "
+             f"deductions {i['deduction_pct']}%, loading {i['loading_pct']}%, "
              f"construction Rs.{i['construction_psf']:,.0f} PSF, "
              f"price Rs.{r['price_psf']:,.0f} PSF ({i['price_psf_source']}), "
              f"land Rs.{i['land_cost_cr']} Cr, term {i['project_years']} years.")
@@ -600,9 +1030,12 @@ def render_markdown(r: dict) -> str:
     L.append("|---|---|---|")
     L.append(f"| Gross plot | as supplied | {a['gross_sqft']:,} sq.ft |")
     L.append(f"| Net plot | after {i['deduction_pct']}% deductions | {a['net_sqft']:,} sq.ft |")
-    L.append(f"| Built-up area | net x FSI {i['fsi']} | {a['bua_sqft']:,} sq.ft |")
-    L.append(f"| Saleable area | BUA x {i['efficiency_pct']}% | {a['saleable_sqft']:,} sq.ft |")
-    L.append(f"| RERA carpet | saleable x {i['carpet_factor']} | {a['carpet_sqft']:,} sq.ft |")
+    L.append(f"| FSI area (permitted) | net x FSI {i['fsi']} | {a['fsi_area_sqft']:,} sq.ft |")
+    L.append(f"| Construction area | FSI area x {i['non_fsi_pct']}% "
+             f"(incl. parking/basements) | {a['construction_area_sqft']:,} sq.ft |")
+    L.append(f"| Saleable area | FSI area x {i['loading_pct']}% | {a['saleable_sqft']:,} sq.ft |")
+    L.append(f"| RERA carpet | saleable x {i['carpet_factor']} "
+             f"({i['carpet_factor_source']}) | {a['carpet_sqft']:,} sq.ft |")
     L.append(f"| Units | saleable / {i['avg_unit_sqft']:,.0f} sq.ft | {a['units']:,} |")
     L.append("")
     L.append("**Cost and return**")
@@ -743,12 +1176,21 @@ def _self_test() -> int:
     inp.price_psf = 8455.0; inp.price_psf_source = "LF absorption price Q1 26-27"
     inp.monthly_velocity_pct = 3.76
     r = compute(inp)
-    chk("saleable sqft", r["areas"]["saleable_sqft"], 259_182, 2)
-    chk("units", r["areas"]["units"], 273, 1)
-    chk("revenue Cr", r["revenue_cr"], 219.14, 0.05)
-    chk("total cost Cr", r["costs"]["total_cr"], 167.90, 0.05)
-    chk("net profit Cr", r["profit_cr"], 51.24, 0.05)
-    chk("margin on revenue %", r["margin_on_revenue_pct"], 23.4, 0.1)
+    # These expectations MOVED when the area chain was recalibrated against
+    # 1,947 filed K-RERA projects. They were not adjusted to make a test pass -
+    # the engine was wrong and the old numbers encoded the error:
+    #   saleable was FSI area x 0.70; it is FSI area x 1.07 (loading, filed)
+    #   construction was costed on FSI area; it is costed on FSI area x 1.35
+    # Revenue rises 53%, cost 30%, so margin moves 23.4% -> 34.9%. The old
+    # engine was UNDERSTATING viability, not flattering it.
+    chk("FSI area sqft", r["areas"]["fsi_area_sqft"], 370_260, 2)
+    chk("construction area sqft", r["areas"]["construction_area_sqft"], 499_851, 2)
+    chk("saleable sqft", r["areas"]["saleable_sqft"], 396_178, 2)
+    chk("units", r["areas"]["units"], 417, 1)
+    chk("revenue Cr", r["revenue_cr"], 334.97, 0.05)
+    chk("total cost Cr", r["costs"]["total_cr"], 217.92, 0.05)
+    chk("net profit Cr", r["profit_cr"], 117.05, 0.05)
+    chk("margin on revenue %", r["margin_on_revenue_pct"], 34.9, 0.1)
 
     print("\n4. internal consistency - what prose kept getting wrong")
     ok = r["cash_flow_check"]["collections_reconcile"]
@@ -770,7 +1212,8 @@ def _self_test() -> int:
     for row in r["sensitivity"]["rows"]:
         for cell in row["cells"]:
             rev = r["areas"]["saleable_sqft"] * cell["price_psf"] / CR
-            cs = _cost_stack(inp, r["areas"]["bua_sqft"], rev, row["land_cr"])
+            # must mirror compute(): the grid costs the CONSTRUCTION area
+            cs = _cost_stack(inp, r["areas"]["construction_area_sqft"], rev, row["land_cr"])
             want = (rev - cs["total_cr"]) / rev * 100
             if abs(want - cell["margin_pct"]) > 0.15: bad += 1
     print(f"  {'PASS' if bad == 0 else 'FAIL'}  {len(r['sensitivity']['rows'])*len(r['sensitivity']['price_axis'])} cells, {bad} disagree")

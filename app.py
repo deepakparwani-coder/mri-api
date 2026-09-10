@@ -1254,6 +1254,39 @@ FEASIBILITY block or it does not appear.
   If a figure rests on an assumption you chose, it is an ASSUMPTION - say so in
   the same sentence, with the value you assumed and where it came from.
 
+**THREE SUPPLY TERMS, AND THEY ARE NOT INTERCHANGEABLE.** (LF glossary)
+- **Total Supply** = marketable wings only. Excludes sold-out wings.
+- **Project Size** = marketable + sold-out wings of that project.
+- **Supply Size** = active + sold-out projects across a micromarket.
+In the glossary's own example Total Supply is 180 units and Supply Size is 235 -
+saying one where you mean the other is a 23% error. Use the term the column
+header uses, and never re-label a total to make two tables agree.
+
+**MARKETABLE SUPPLY = sales in the period + period-end unsold.** Annual and
+quarterly marketable supply are DIFFERENT quantities (110 vs 97 in the
+glossary's example). Never compare one against the other, or compute a change
+between them.
+
+**SALES VELOCITY IS DEFINED PER LEVEL.** Wing = monthly sales / total supply;
+project = the MEAN of its wing velocities; region = the MEDIAN of wing
+velocities. A regional figure and a project figure are therefore not expected to
+reconcile, and a small gap between them is not a defect to report.
+
+**EVERY ASSUMPTION IS VISIBLE, EVERY TIME.**
+When the data block contains "INPUTS AND THEIR PROVENANCE" or "INPUTS AS THEY
+STAND", the report MUST carry that table verbatim, under a heading
+"Assumptions and inputs", before the verdict.
+- Reproduce every row, including rows marked DEFAULT. A default the reader
+  cannot see is exactly how a plot sanctioned at FAR 3.0 came to be appraised
+  at 2.5.
+- Never restate a DEFAULT as SUPPLIED or DERIVED, and never drop a row because
+  it looks routine.
+- If a row is marked DEFAULT and it materially moves the verdict - FSI,
+  efficiency, construction cost, target margin - say so in one line beneath the
+  table and name what confirming it would change.
+- SUPPLIED / DERIVED / DEFAULT / MISSING are values of the status column, not
+  adjectives for you to choose between.
+
 **FSI / FAR IS NEVER ASSUMED.**
 It multiplies the entire appraisal - moving it 2.5 to 3.0 changed one report's
 revenue by Rs.164 Cr. So:
@@ -1690,7 +1723,8 @@ def handle_query():
     # fixed data. Prose maths produced a 7% area error, a sensitivity matrix
     # where 12 of 20 cells did not reconcile, and an IRR off by 18 points -
     # none of which raised an error.
-    _feas_block, _feas_why = build_feasibility_block(user_query, data_results)
+    _feas_block, _feas_why = build_feasibility_block(
+        user_query, data_results, overrides=body.get('overrides'))
     print(f"[DIAG-8] FEASIBILITY_CALC: {_feas_why}")
     # The price and its quarter are the single most consequential inputs in the
     # whole report. Log them explicitly so a stale one is greppable, not
@@ -1938,7 +1972,9 @@ def _continuation_params(api_params, text_so_far, stop_reason="length"):
 # ── Deterministic feasibility ───────────────────────────────────────────────
 try:
     from feasibility import parse_feasibility_inputs, \
-        compute_with_launch_plan as _feas_compute, render_markdown as _feas_render
+        compute_with_launch_plan as _feas_compute, render_markdown as _feas_render, \
+        qualifier_spec as _qual_spec, apply_overrides as _qual_apply, \
+        confirmation_summary as _qual_summary, apply_calibration as _qual_calib
     _FEAS_OK = True
 except Exception as _e:            # module missing -> behave exactly as before
     print(f"  [FEAS] calculator unavailable ({_e}); falling back to prose maths")
@@ -2091,7 +2127,65 @@ def describe_intent(user_query):
     return {"is_feasibility": False, "label": "Reading the graph"}
 
 
-def build_feasibility_block(user_query, data_results):
+def _derive_carpet_factor(data_results):
+    """carpet/saleable read from LF's own two series, not assumed.
+
+    LF publishes a saleable PSF and a carpet PSF for the SAME market and
+    quarter. Both restate the same flat cost, so the ratio is
+    saleable_psf / carpet_psf - no conversion, no constant. Returns
+    (factor, citation) or (None, None) when both series are not present.
+    """
+    def latest(names, col):
+        for r in data_results or []:
+            if r.get("query") in names and r.get("data"):
+                rows = [x for x in r["data"] if x.get(col)]
+                rows = [x for x in rows
+                        if _quarter_sort_key(x.get("quarter") or x.get("Financial Quarter"))]
+                if not rows:
+                    continue
+                rows.sort(key=lambda x: _quarter_sort_key(
+                    x.get("quarter") or x.get("Financial Quarter")))
+                last = rows[-1]
+                try:
+                    return float(last[col]), (last.get("quarter")
+                                              or last.get("Financial Quarter"))
+                except (TypeError, ValueError):
+                    continue
+        return None, None
+
+    for col in ("absorption_price", "wt_avg_price"):
+        sal, q1 = latest(_PRICE_QUERIES, col)
+        car, q2 = latest(_CARPET_PRICE_QUERIES, col)
+        if sal and car and q1 == q2 and 0.4 < sal / car < 1.0:
+            basis = "absorption" if col == "absorption_price" else "weighted average"
+            return (round(sal / car, 4),
+                    f"derived from the LF saleable and carpet {basis} series, {q1}")
+    return None, None
+
+
+_JURISDICTION_HINTS = (
+    ("GBA/BBMP", r"\bbbmp\b|\bgba\b|bruhat|greater bengaluru"),
+    ("BDA", r"\bbda\b|bangalore development|bengaluru development"),
+    ("BMRDA", r"\bbmrda\b"),
+    ("Karnataka", r"karnataka|bengaluru|bangalore|whitefield|mysuru|mangaluru"),
+)
+
+
+def _jurisdiction_hint(user_query, data_results):
+    """Best available statement of the planning authority, from the query or the
+    pin resolution. Returns None when nothing says - and None means the
+    calibration does not fire, which is the correct outcome."""
+    blob = user_query or ""
+    for r in data_results or []:
+        if r.get("query") in ("pin_resolution", "micromarket_detail"):
+            blob += " " + str(r.get("data"))
+    for name, pat in _JURISDICTION_HINTS:
+        if re.search(pat, blob, re.IGNORECASE):
+            return name
+    return None
+
+
+def build_feasibility_block(user_query, data_results, overrides=None):
     """Return (markdown_block, diagnostic) - block is None when not applicable."""
     if not _FEAS_OK:
         return None, "calculator unavailable"
@@ -2101,10 +2195,30 @@ def build_feasibility_block(user_query, data_results):
         return None, f"parse error: {e}"
     if inp is None:
         return None, "not a feasibility query"
+    # Values the user confirmed in the qualifier outrank whatever the parser
+    # read out of the sentence, and are recorded as confirmed so the report can
+    # tell them apart from defaults.
+    if overrides:
+        inp = _qual_apply(inp, overrides)
+    # Filed K-RERA medians fill FSI and the area factors for Karnataka plots the
+    # user has not pinned down. It refuses outright outside Karnataka rather
+    # than lending a Bengaluru median to a Pune plot.
+    _auth = (overrides or {}).get("fsi_authority") or _jurisdiction_hint(user_query, data_results)
+    if _auth:
+        inp = _qual_calib(inp, _auth)
 
     want_carpet = bool(re.search(r"carpet|rera.basis", user_query or "", re.I))
     lf_price, lf_vel, lf_basis, lf_qtr, lf_detail = _lf_price_and_velocity(
         data_results, want_carpet=want_carpet)
+
+    # The carpet factor was a constant 0.74 for every market. LF publishes BOTH
+    # bases for the same quarter, so the ratio is readable, not assumable:
+    # Kolkata runs 0.670, Bengaluru/Pune ~0.73. On Kolkata the constant was
+    # wrong by +10.4%.
+    _cf, _cf_src = _derive_carpet_factor(data_results)
+    if _cf:
+        inp.carpet_factor = _cf
+        inp.carpet_factor_source = _cf_src
     if str(lf_detail).startswith("ABSTAINED"):
         return None, lf_detail
 
@@ -2135,6 +2249,11 @@ def build_feasibility_block(user_query, data_results):
             "to the reader that reads as 'derived from data'.\n"
             "Write the market analysis you CAN support from LF data, then state "
             "plainly which inputs are needed to run the appraisal, and stop.\n"
+            "\n=== INPUTS AS THEY STAND ===\n"
+            "Reproduce this table verbatim in the report under 'Assumptions and "
+            "inputs'. It is the reader's only means of telling a confirmed "
+            "figure from a default.\n"
+            + _qual_summary(inp) + "\n"
         )
         return block, "ABSTAINED (block states the gap): " + ", ".join(missing)
     try:
@@ -2155,7 +2274,18 @@ def build_feasibility_block(user_query, data_results):
         "elsewhere in this report contradicts it, STOP: report the discrepancy "
         "as the finding and do not issue a verdict.\n"
     )
-    return header + "\n" + block, f"computed [{lf_detail}]"
+    # EVERY feasibility report carries its inputs and their provenance. A plot
+    # sanctioned at FAR 3.0 was appraised at 2.5 because the assumption was
+    # applied in silence and no one could see it to challenge it. Silence is the
+    # defect; the table is the fix.
+    inputs_table = (
+        "\n=== INPUTS AND THEIR PROVENANCE ===\n"
+        "Reproduce this table verbatim in the report under 'Assumptions and "
+        "inputs'. Do not summarise it, do not drop rows marked DEFAULT, and do "
+        "not restate a DEFAULT as though it were supplied or derived.\n"
+        + _qual_summary(inp) + "\n"
+    )
+    return header + "\n" + block + "\n" + inputs_table, f"computed [{lf_detail}]"
 
 
 # ── Generation deadline ─────────────────────────────────────────────────────
@@ -2283,6 +2413,63 @@ def _run_job(job_id, payload):
         _job_set(job_id, status="error", error=f"{type(e).__name__}: {e}")
 
 
+@app.route('/api/feasibility/qualify', methods=['POST'])
+def feasibility_qualify():
+    """Describe every input a feasibility appraisal will use, before it runs.
+
+    The client shows this as a form. Nothing here is a question invented for the
+    form: the field list is generated from the calculator's own input contract,
+    so a query that satisfies this form cannot then abstain for a field the form
+    never asked about.
+
+    Returns {"applicable": bool, "fields": [...]}. `applicable` is false for a
+    query that is not a feasibility request, and the client then just runs it.
+    """
+    body = request.json or {}
+    q = body.get('query', '') or ''
+    if not _FEAS_OK:
+        return jsonify({"applicable": False, "reason": "calculator unavailable"})
+    if not describe_intent(q)["is_feasibility"]:
+        return jsonify({"applicable": False, "reason": "not a feasibility query"})
+    try:
+        inp = parse_feasibility_inputs(q)
+    except Exception as e:
+        return jsonify({"applicable": False, "reason": f"parse error: {e}"})
+    if inp is None:
+        inp = None
+
+    # Pull the LF price so the form can PRE-FILL it rather than ask for it. The
+    # objection to a qualifier is that it interrogates the user for things the
+    # system already knows; this is the answer to that objection.
+    lf_price = lf_src = lf_vel = None
+    try:
+        city = body.get('city', 'Gurugram')
+        data_results = classify_intent(q, city)
+        _p, _v, _basis, _qtr, _detail = _lf_price_and_velocity(data_results)
+        if not str(_detail).startswith("ABSTAINED"):
+            lf_price, lf_vel = _p, _v
+            lf_src = f"LF knowledge base, {_basis} price, {_qtr or 'latest quarter'}"
+    except Exception as e:
+        print(f"  [QUALIFY] LF pre-fill unavailable: {e}")
+
+    # Pre-fill FSI and the area factors from the filed distribution for the
+    # authority, so the form shows DERIVED figures with a citation instead of
+    # asking the user for numbers the regulator already publishes.
+    auth = _jurisdiction_hint(q, data_results)
+    if inp is not None and auth:
+        try:
+            inp = _qual_calib(inp, auth)
+        except Exception as e:
+            print(f"  [QUALIFY] calibration unavailable: {e}")
+
+    spec = _qual_spec(inp, lf_price=lf_price, lf_price_source=lf_src or "",
+                      lf_velocity=lf_vel)
+    n_missing = sum(1 for f in spec["fields"] if f["status"] == "missing"
+                    and f["group"] == "required")
+    return jsonify({"applicable": True, "blocking": n_missing,
+                    "authority": auth, **spec})
+
+
 @app.route('/api/query/async', methods=['POST'])
 def start_query_job():
     """Submit a query. Returns a job id immediately; poll for the result."""
@@ -2394,7 +2581,7 @@ def health():
     status = {"status": "ok", "config": _CONFIG_OK,
               "llm_provider": llm.provider(), "llm_model": llm.model_name(),
               "llm_reasoning": llm.reasoning_effort(),
-              "build": "2026-09-08-intentlabel",
+              "build": "2026-09-10-areachain",
               "async_generation": True}
     if _CONFIG_OK and NEO4J_PASSWORD:
         try:

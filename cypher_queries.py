@@ -141,8 +141,9 @@ QUERY_DEFINITIONS = {
     "price_trend_saleable": {
         "description": (
             "Saleable-area PSF time series across all available quarters. Per "
-            "quarter: wt_avg_price (weighted average ₹/saleable sqft on full "
-            "marketable supply), absorption_price (Wt. Avg. Price on Sold — "
+            "quarter: wt_avg_price (Wt. Avg. Price on UNSOLD - weighted by unsold "
+            "volume, i.e. the price at which remaining stock is ASKED, per the "
+            "LF glossary; NOT weighted by full marketable supply), absorption_price (Wt. Avg. Price on Sold — "
             "what units actually transacted at), median_price, min_price, "
             "max_price, and new_supply_price (Wt. Avg. on units launched that "
             "quarter). All values in ₹ per saleable sqft. Use for price-trend, "
