@@ -77,6 +77,13 @@ CITY_EXPECTATIONS = {
         "projects_by_region": {"Gurugram": 62, "Sohna": 8, "Dwarka": 1},
         "mm_by_region": {"Gurugram": 30, "Sohna": 6, "Dwarka": 1},
     },
+    "Hinjewadi Nov 26": {
+        # Liases Foras RESSEX, Sub Location Hinjewadi, Q2 26-27 (captured 16 Nov 2026)
+        "projects": 45,
+        "micromarkets": 1,
+        "projects_by_region": {"Hinjewadi Nov 26": 45},
+        "mm_by_region": {"Hinjewadi Nov 26": 1},
+    },
     # Add Mumbai/Bangalore/etc. here as you onboard them.
 }
 
@@ -205,6 +212,9 @@ def normalize_rera(raw: Any) -> tuple[Optional[str], str]:
         return None if not s else s, "Not Available"
     if s.upper().startswith("GGM/"):
         return s, "Registered"
+    # MahaRERA (P5xxxxxxxxxx, PR/PM...), K-RERA (PRM/KA/RERA/...), WBRERA etc.
+    if re.match(r"^[A-Z]{1,4}[/A-Z0-9-]*\d{6,}", s.upper()):
+        return s, "Registered"
     return s, "Not Available"
 
 
@@ -292,16 +302,23 @@ def create_constraints(session: Session) -> None:
         "CREATE CONSTRAINT flattype_name IF NOT EXISTS FOR (ft:FlatType) REQUIRE ft.name IS UNIQUE",
         "CREATE CONSTRAINT stage_name IF NOT EXISTS FOR (s:ConstructionStage) REQUIRE s.name IS UNIQUE",
         # v2 dimension labels (replaced PriceBand/SizeBand/DistanceBand from v3)
-        "CREATE CONSTRAINT priceband_name IF NOT EXISTS FOR (pb:PriceBand) REQUIRE pb.name IS UNIQUE",
+        "CREATE CONSTRAINT priceband_name_basis IF NOT EXISTS FOR (pb:PriceBand) REQUIRE (pb.name, pb.basis) IS UNIQUE",
         "CREATE CONSTRAINT ticketband_name IF NOT EXISTS FOR (tb:TicketSizeBand) REQUIRE tb.name IS UNIQUE",
         "CREATE CONSTRAINT unitsizeband_name_area IF NOT EXISTS FOR (sb:UnitSizeBand) REQUIRE (sb.name, sb.area_type) IS UNIQUE",
         "CREATE CONSTRAINT distancerange_name IF NOT EXISTS FOR (dr:DistanceRange) REQUIRE dr.name IS UNIQUE",
         "CREATE CONSTRAINT possession_year IF NOT EXISTS FOR (py:PossessionYear) REQUIRE py.year IS UNIQUE",
         "CREATE CONSTRAINT city_name IF NOT EXISTS FOR (c:City) REQUIRE c.name IS UNIQUE",
     ]
+    ok = 0
     for c in constraints:
-        session.run(c)
-    log.info(f"✓ Created/verified {len(constraints)} constraints")
+        try:
+            session.run(c)
+            ok += 1
+        except Exception as e:
+            # Every write below is a MERGE, which is correct with or without the
+            # constraint; an existing equivalent constraint must not abort a load.
+            log.warning(f"Constraint skipped ({e.__class__.__name__}): {c[:90]}")
+    log.info(f"✓ Created/verified {ok}/{len(constraints)} constraints")
 
 
 # ════════════════════════════════════════════════════════════════════════════
