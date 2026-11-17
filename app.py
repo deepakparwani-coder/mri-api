@@ -764,6 +764,54 @@ def classify_intent(query, city):
 # ═══════════════════════════════════════
 # DATA-BLOCK FORMATTER (v4)
 # ═══════════════════════════════════════
+# ── DATES: market name vs dataset label, and quarter -> calendar months ──
+# A dataset key can carry an ingest tag ("Hinjewadi Nov 26" = captured in
+# Nov 2026). The model read that tag as the data period and wrote "November
+# 2026 residential market" over Q2 FY2026-27 (Jul-Sep 2026) data. The market
+# name shown to the model drops such tags, and every quarter label is given
+# its calendar months in code, so the model never has to work them out.
+_INGEST_TAG_RE = re.compile(
+    r"\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s*'?\d{2,4}$", re.I)
+_FY_Q_MONTHS = {1: ("Apr", "Jun", 0), 2: ("Jul", "Sep", 0), 3: ("Oct", "Dec", 0), 4: ("Jan", "Mar", 1)}
+
+
+def market_name(city):
+    """'Hinjewadi Nov 26' -> 'Hinjewadi'. Cypher keeps using the full key."""
+    base = _INGEST_TAG_RE.sub("", city or "").strip()
+    return base or city
+
+
+def quarter_calendar(label):
+    """'Q2 26-27' -> ('Q2 FY2026-27', 'Jul–Sep 2026'). Indian fiscal year, Apr–Mar."""
+    m = re.match(r"\s*Q([1-4])\s*(?:FY)?\s*(\d{2,4})\s*-\s*(\d{2})", str(label or ""))
+    if not m:
+        return None
+    q, y1 = int(m.group(1)), int(m.group(2))
+    y1 = y1 + 2000 if y1 < 100 else y1
+    a, b, add = _FY_Q_MONTHS[q]
+    return f"Q{q} FY{y1}-{str(y1 + 1)[-2:]}", f"{a}–{b} {y1 + add}"
+
+
+def period_header_lines(city):
+    out = []
+    name = market_name(city)
+    if name != city:
+        out.append(f"MARKET: {name}")
+        out.append(f'DATASET LABEL: "{city}" is an internal ingest tag. It is NOT a '
+                   f"date and NOT the data period. Never derive a month or year from it.")
+    else:
+        out.append(f"CITY: {city}")
+    vq = get_data_vintage(city)
+    qc = quarter_calendar(vq) if vq else None
+    if qc:
+        out.append(f"LATEST DATA QUARTER: {qc[0]} = {qc[1]}.")
+    out.append("FISCAL CALENDAR (Indian, Apr–Mar): Q1 = Apr–Jun, Q2 = Jul–Sep, "
+               "Q3 = Oct–Dec, Q4 = Jan–Mar of the following calendar year. "
+               "The data period comes ONLY from quarter labels in the data — never "
+               "from the dataset label, the report date or today's date.")
+    return out
+
+
 def format_data_block_for_claude(data_results, city, corridor_sectors=None):
     """Render Cypher results as a structured block with per-query descriptions.
 
@@ -772,7 +820,7 @@ def format_data_block_for_claude(data_results, city, corridor_sectors=None):
     of column names and prevents unit-confusion errors.
     """
     lines = []
-    lines.append(f"CITY: {city}")
+    lines.extend(period_header_lines(city))
     lines.append("")
 
     # ─── DATA-AVAILABILITY SUMMARY ───
@@ -1575,8 +1623,10 @@ MANDATORY: Include at least one <lfchart> when the data supports it (3+ data poi
 End EVERY response with:
 ---
 **Data Source:** Liases Foras Proprietary Research Database
-**Data Period:** [exact quarters/years]
-**City:** [city name]
+**Data Period:** [exact quarters with their calendar months, e.g. "Q2 FY2016-17 (Jul–Sep 2016) to Q2 FY2026-27 (Jul–Sep 2026)"]
+**City:** [the MARKET or CITY name from the data block — never the dataset label]
+
+DATES RULE: Describe the market by its latest data quarter, written with its calendar months as given in the data block (e.g. "Q2 FY2026-27, Jul–Sep 2026"). Never name a month or year that does not come from a quarter label in the data. A report generated in November describes the latest quarter in the data, not "November".
 **Confidence:** [HIGH / MEDIUM / LOW]
 **Basis:** [explanation referencing LF Knowledge Base]"""
 
