@@ -96,6 +96,14 @@ EXPECTED_MM_BY_REGION = {}
 # Auto-derived in main() — every City node EXCEPT the one being loaded
 IMMUTABLE_CITIES: list[str] = []
 
+# Windows consoles default to cp1252, which cannot print the check marks in the
+# log lines; a failed print used to bury the real error under a UnicodeEncodeError.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-7s | %(message)s",
