@@ -59,6 +59,12 @@ from geo_resolver import extract_pin, resolve_pin
 
 # Import our queries (now a QueryRegistry, not a plain dict)
 from cypher_queries import QUERIES
+try:
+    import site_engine as _se
+    _SE_OK = True
+except Exception as _se_err:          # never let the engine take the API down
+    print(f"site_engine unavailable: {_se_err}")
+    _SE_OK = False
 
 app = Flask(__name__)
 CORS(app)
@@ -1388,6 +1394,29 @@ distrust all of it.
 
 Follow this EXACT framework:
 
+**COMPUTED BLOCKS ARE THE REPORT. THE FRAMEWORK BELOW ONLY ORDERS THEM.**
+When the data contains any of these blocks, the matching step IS that block -
+reproduce its tables and figures, then interpret them. Never re-derive, rescore,
+re-rank or replace them with web findings or market-level averages:
+- COMPUTED SITE SCORECARD  -> Step 2 (and the site score in Step 0 / Step 7).
+  Rows marked NOT SCORED stay unscored: say which data layer would score them.
+  Do not give them a number and do not describe them as weaknesses of the site.
+- COMPUTED COMPETITION SET -> Step 4. It already holds every LF project within
+  the user's radius ranked by annual sales; do not shorten the radius or fall
+  back to a city top-10.
+- COMPUTED PRODUCT MIX     -> Step 5. Show the competitor benchmark by
+  configuration, the recommended mix with units, sizes, carpet, rate and
+  ticket, and the capture check, naming the benchmark projects.
+- COMPUTED SCENARIOS       -> Step 3. One column per road width the user gave.
+  The land bid ceiling depends on the FSI purchase rate and the required
+  margin: quote the table, never the Rs.0 purchase row as "the" bid.
+web_search may add regulatory or infrastructure CONTEXT, labelled [Web Context].
+It never sets a score, an FSI, a price, a size or a mix percentage.
+LENGTH: when COMPUTED SCENARIOS is present, do not also copy the area and cost
+tables of the scenario-A detail block - the scenario table already holds them.
+From the detail block use only the cash flow, absorption and launch-plan tables.
+Show at most the top 10 rows of the competition set.
+
 **THE SITE SCORE IS ARITHMETIC, NOT JUDGEMENT.**
 Build the Step 2 scorecard BEFORE you write the Step 0 verdict. Then:
 - Show every one of the 8 parameters as its own row. Never omit a row you have
@@ -1441,7 +1470,7 @@ detailed steps below to justify it. The verdict is the single thing the reader
 needs; it must never be the part that goes missing.
 
 **VERDICT: [GO / CONDITIONAL GO / NO-GO]**
-- Site score: [x]/80 - [STRONG / MODERATE / WEAK]
+- Site score: [x]/[out of] - [band] (one per road-width scenario, exactly as computed)
 - Margin at market price: [x]% | IRR: [x]% | Equity multiple: [x]x
 - Maximum viable land cost: Rs.[x] Cr (vs Rs.[y] Cr asked)
 - Single biggest risk: [one line]
@@ -1460,8 +1489,9 @@ If the user provides a Google Maps URL:
 - Identify which micromarket this falls under from the LF data
 - Use web_search to identify: "what is near [coordinates/location name]" — nearby landmarks, IT parks, highways, metro stations
 
-**STEP 2 — SITE SURROUNDINGS ANALYSIS (use web_search — MANDATORY for feasibility queries)**
-Search for and score the site on these 8 parameters. For each, identify specific landmarks within 1-5 km radius and assign a score (1-10):
+**STEP 2 — SITE SURROUNDINGS ANALYSIS**
+If a COMPUTED SITE SCORECARD is supplied, this step is that table, verbatim, with
+its totals. Only when NO computed scorecard is supplied, score these 8 parameters. For each, identify specific landmarks within 1-5 km radius and assign a score (1-10):
 
 | Parameter | What to Search For | Score Guide |
 |---|---|---|
@@ -1562,15 +1592,24 @@ J. EQUITY MULTIPLE = total cash inflows / total equity invested. <1.5x WEAK, 1.5
 K. ABSORPTION SCENARIO MODELING — Pessimistic (LF velocity -30%), Base Case (LF velocity), Optimistic (LF velocity +20%) — show IRR/NPV/Equity Multiple/Breakeven Month for each.
 
 **STEP 4 — COMPETITIVE POSITIONING (from LF data)**
-- Pull ALL projects from the same micromarket using comparable_projects data
+- If a COMPUTED COMPETITION SET is supplied, use it: every project within the
+  user's radius, ranked by annual sales, with the catchment totals beneath.
+- Otherwise pull projects from the same micromarket using comparable_projects
 - Show top 10 by annual sales with exact metrics
 - Identify PRICING GAPS — price bands with low competition
 - Identify CONFIGURATION GAPS — BHK types undersupplied
 - Show velocity leaders as benchmarks
 
-**STEP 5 — DEVELOPMENT MIX OPTIMIZER (CRITICAL — never default to single-use)**
+**STEP 5 — PRODUCT MIX**
 
-ALWAYS run when ANY of these conditions exist: FSI > 2.5, user mentions "commercial" in DCR/parking norms, plot is in IT corridor, plot area > 5 acres, or user explicitly asks about mixed-use.
+RESIDENTIAL CONFIGURATION MIX: if a COMPUTED PRODUCT MIX is supplied, Step 5
+opens with it (benchmark table, recommended mix with units / sizes / carpet /
+rate / ticket per configuration, capture check). If none is supplied, say that
+no competitor-benchmarked mix exists for this city and give market flat-type
+absorption only, without unit percentages.
+
+MIXED-USE OPTIMIZER: run ONLY when the user asks about commercial, retail or
+mixed use, or names an FSI above the UDCPR residential maximum for the road.
 
 UDCPR FSI CONSTRAINT CHECK (Maharashtra): Basic residential FSI = 1.10. Max with premium + TDR varies by road width (9m: 1.10, 30m+: 3.00). If user's FSI exceeds residential max, the excess MUST be commercial/IT/institutional.
 
@@ -1603,18 +1642,18 @@ After the mix table, recommend the OPTIMAL allocation with reasoning, total reve
 
 **STEP 7 — GO / CONDITIONAL GO / NO-GO VERDICT**
 
-A. SITE VERDICT (from scorecard): >65/80 STRONG, 45-65 MODERATE, <45 WEAK
+A. SITE VERDICT (from scorecard): >=70/80 STRONG, 55-69 MODERATE, 40-54 WEAK, <40 POOR (pro-rata when a parameter is not scored)
 B. FINANCIAL VERDICT: definitive GO/NO-GO if user provided land cost; otherwise state MAXIMUM VIABLE LAND COST clearly
 C. COMBINED VERDICT FORMAT:
    **VERDICT: [GO / CONDITIONAL GO / NO-GO]**
-   **Site Score: [X]/80 — [STRONG/MODERATE/WEAK]**
+   **Site Score: [X]/[out of] — [band], per scenario as computed**
    **Maximum Viable Land Cost: Rs.[X] Crores (Rs.[Y] Cr/acre)**
    **Breakeven Price PSF: Rs.[Z] (vs market average Rs.[M])**
    Then 1 paragraph executive summary explaining WHY — referencing specific data points.
 D. ACTIONABLE NEXT STEPS — 3-4 concrete next steps the user should take.
 
 === CRITICAL RULE FOR FEASIBILITY ===
-When a feasibility query comes in, ALWAYS activate web_search even if the query doesn't match web keywords. The user expects location-specific intelligence that REQUIRES web search — nearby landmarks, upcoming infrastructure, corporate campuses. LF data alone is NOT sufficient for feasibility.
+When a feasibility query comes in, web_search may be used for regulatory and infrastructure CONTEXT (planning authority, metro status, zoning portals), labelled [Web Context]. Scores, FSI, prices, sizes and the product mix come only from the computed blocks and LF data.
 
 **SITE INTELLIGENCE:** Same as Land Feasibility but without the financial projections. Focus on Steps 1-2 (location + surroundings) and Step 7 (verdict).
 
@@ -1737,6 +1776,15 @@ def handle_query():
             "source": "GeoResolver_pin",
         })
 
+    # Pin-level competition set, site scorecard and product mix - computed,
+    # never model-judged. Runs before the data block is formatted so the
+    # market series it needs are in data_results.
+    site_ctx = None
+    try:
+        site_ctx = build_site_context(user_query, city, geo, data_results)
+    except Exception as e:
+        print(f"  [SITE] engine failed, report continues without it: {e}")
+
     # Step 2: Detect if web intelligence is needed
     web_mode = needs_web(user_query)
     if web_mode:
@@ -1774,12 +1822,19 @@ def handle_query():
     # where 12 of 20 cells did not reconcile, and an IRR off by 18 points -
     # none of which raised an error.
     _feas_block, _feas_why = build_feasibility_block(
-        user_query, data_results, overrides=body.get('overrides'), geo=geo)
+        user_query, data_results, overrides=body.get('overrides'), geo=geo,
+        site=site_ctx, history=history)
     print(f"[DIAG-8] FEASIBILITY_CALC: {_feas_why}")
     # The price and its quarter are the single most consequential inputs in the
     # whole report. Log them explicitly so a stale one is greppable, not
     # inferred three reports later from a margin that looked odd.
     print(f"[DIAG-8b] FEASIBILITY_PRICE_PROVENANCE: {_feas_why}")
+    if site_ctx:
+        try:
+            data_text = data_text + "\n\n" + render_site_blocks(site_ctx)
+        except Exception as e:
+            print(f"  [SITE] render failed: {e}")
+    _site_summary = site_score_summary(site_ctx)
     if _feas_block:
         data_text = data_text + "\n\n" + _feas_block
 
@@ -1911,6 +1966,7 @@ def handle_query():
                     'total_rows': sum(r.get('row_count', 0) for r in data_results),
                     'data_through': get_data_vintage(city),
                     'city': city,
+                    'site_score': _site_summary,
                 }
                 yield f"data: {json.dumps(done_meta)}\n\n"
             except Exception as e:
@@ -1947,7 +2003,7 @@ def handle_query():
         fired_categories = classify_web_intent(user_query) if web_mode else []
 
         # Extract text from potentially mixed content blocks (text + web_search results)
-        response_text = reconcile_site_score(_continued_text)
+        response_text = finalize_report(_continued_text, _site_summary)
         web_searches_made = [q for q in _searches_seen if q]
         for search_query in web_searches_made:
             print(
@@ -2251,13 +2307,15 @@ def _road_width_m(text):
     return None
 
 
-def _udcpr_fsi(user_query, geo):
+def _udcpr_fsi(user_query, geo, road=None):
     """FSI for the stated road width from the trusted UDCPR module, or None.
 
     Returns (fsi_dict, authority_label, facts_markdown). The module holds Table
     6-G verbatim; the model used to fetch it from the web and left the 60%
     ancillary FSI out of the plot's building potential."""
-    road = _road_width_m(user_query)
+    if road is None:
+        _ws = _se.parse_road_widths(user_query) if _SE_OK else []
+        road = _ws[0] if _ws else _road_width_m(user_query)
     if not road:
         return None
     try:
@@ -2285,9 +2343,11 @@ def _udcpr_fsi(user_query, geo):
         f"over and above -> total building potential {f['effective_max_fsi']:.2f}\n"
         f"If the plot were under a Municipal Corporation instead ({alt if muncorp else 'muncorp'} column): "
         f"maximum potential {fa['max_potential_fsi']:.2f}, with ancillary {fa['effective_max_fsi']:.2f}.\n"
-        "The appraisal's FSI is the maximum potential (basic + premium + TDR). State the ancillary FSI "
-        "separately, and say premium FSI and TDR are purchased, not automatic. Confirm the authority "
-        "and the sanctioned road width before relying on either figure.\n"
+        "The appraisal uses the TOTAL building potential including ancillary FSI (under UDCPR, "
+        "staircase, lift and lobby areas count against FSI and are bought as ancillary FSI). Say that "
+        "premium FSI, TDR and ancillary FSI are purchased, not automatic, and that their cost is shown "
+        "against a range of rates unless the developer supplied one. Confirm the authority and the "
+        "sanctioned road width before relying on either figure.\n"
     )
     return f, label, facts
 
@@ -2297,7 +2357,8 @@ _SCORE_TOTAL_RE = re.compile(r"(\d{1,3})\s*/\s*80\b")
 
 
 def _band80(n):
-    return "STRONG" if n > 65 else "MODERATE" if n >= 45 else "WEAK"
+    # Same table as the prompt and site_engine: 70 / 55 / 40.
+    return "STRONG" if n >= 70 else "MODERATE" if n >= 55 else "WEAK" if n >= 40 else "POOR"
 
 
 def reconcile_site_score(text):
@@ -2333,13 +2394,159 @@ def reconcile_site_score(text):
         note = (f"{total}/{n * 10} is the sum of the {n} scorecard rows shown; "
                 f"{8 - n} of the 8 parameters {'was' if 8 - n == 1 else 'were'} not scored, so no /80 score exists.")
     text = _SCORE_TOTAL_RE.sub(new, text)
-    for w in ("STRONG", "MODERATE", "WEAK"):
+    for w in ("STRONG", "MODERATE", "WEAK", "POOR"):
         text = re.sub(rf"({re.escape(new)}\s*[-\u2013\u2014:]*\s*){w}\b",
                       rf"\g<1>{_band80(round(total * 80 / (n * 10)))}", text)
     return text + f"\n\n> *Site score recomputed by the system: {note}*\n"
 
 
-def build_feasibility_block(user_query, data_results, overrides=None, geo=None):
+# ── Site context: competition set, scorecard, product mix ───────────────────
+_SITE_TRIGGER = re.compile(r"feasib|benchmark|competit|product mix|unit mix|configuration|bhk mix|"
+                           r"size mix|scorecard|site score|land|plot|acre", re.I)
+
+
+def _rows(r):
+    return (r or {}).get("data") or (r or {}).get("rows") or []
+
+
+def _market_context(data_results):
+    """Latest-quarter market velocity / MI / absorption price and price YoY."""
+    mk = {}
+    for r in data_results or []:
+        if r.get("query") == "market_overview":
+            row, q, _ = _latest_row(r)
+            if row:
+                mk.update(velocity_pct=row.get("velocity"), months_inv=row.get("months_inv"), qtr=q)
+        if r.get("query") == "price_trend_saleable":
+            rows = [x for x in _rows(r) if isinstance(x, dict)]
+            rows = sorted(rows, key=lambda x: _quarter_sort_key(x.get("quarter")) or (0, 0))
+            vals = [(x.get("quarter"), x.get("absorption_price") or x.get("wt_avg_price")) for x in rows]
+            vals = [(q, float(v)) for q, v in vals if v]
+            if vals:
+                mk.setdefault("qtr", vals[-1][0])
+                mk["price_psf"] = vals[-1][1]
+                if len(vals) >= 5 and vals[-5][1]:
+                    mk["price_yoy_pct"] = (vals[-1][1] / vals[-5][1] - 1) * 100
+    return mk
+
+
+def build_site_context(user_query, city, geo, data_results):
+    """Run the pin-level queries and the deterministic site engine.
+
+    Returns None when there is no pin or the query is not about a site."""
+    if not (_SE_OK and geo and geo.get("lat") is not None and _SITE_TRIGGER.search(user_query or "")):
+        return None
+    radius = _se.parse_radius_km(user_query, default=3.0)
+    lat, lng = geo["lat"], geo["lng"]
+    have = {r.get("query") for r in data_results}
+    for q in ("market_overview", "price_trend_saleable", "flat_performance", "ticket_size"):
+        if q not in have:
+            try:
+                data_results.append(run_query(q, city=city))
+            except Exception as e:
+                print(f"  [SITE] {q} unavailable: {e}")
+    pin = next((r for r in data_results if r.get("query") == "pin_projects"), None)
+    if pin is None or (radius > 5.0):
+        pin = run_query("pin_projects", city=city, lat=lat, lng=lng, radius_km=max(5.0, radius))
+    typ = run_query("pin_typology", city=city, lat=lat, lng=lng, radius_km=radius)
+    poi = run_query("pin_poi", city=city, lat=lat, lng=lng, radius_km=8.0)
+    poi_n = 0
+    try:
+        poi_n = (_rows(run_query("poi_count", city=city)) or [{}])[0].get("n") or 0
+    except Exception:
+        pass
+    widths = _se.parse_road_widths(user_query)
+    labels = _se.scenario_labels(user_query, widths)
+    comp = _se.competition_set(_rows(pin), radius)
+    market = _market_context(data_results)
+    score = _se.score_site(road_widths=widths, comp=comp, market=market,
+                           poi=_rows(poi), poi_loaded=poi_n > 0)
+    flats = next((_rows(r) for r in data_results if r.get("query") == "flat_performance"), [])
+    tickets = []
+    for r in data_results:
+        if r.get("query") == "ticket_size":
+            tickets = [dict(x, band=x.get("band") or x.get("ticket_range") or x.get("ticket_band") or x.get("range")) for x in _rows(r)]
+    bench = _se.benchmark_configs(_rows(typ)) if _rows(typ) else {}
+    cf, _ = _derive_carpet_factor(data_results)
+    mix = _se.recommend_mix(bench, flats, tickets, comp=comp, carpet_factor=cf) if bench and flats else None
+    print(f"  [SITE] radius {radius} km: {comp['n']} projects, typology rows {len(_rows(typ))}, "
+          f"POIs {len(_rows(poi))} (layer {poi_n}), widths {widths}, "
+          f"score {[(w, t['total'], t['out_of']) for w, t in score['totals'].items()]}, "
+          f"mix {'yes' if mix else 'no'}")
+    return dict(radius=radius, widths=widths, labels=labels, comp=comp, score=score, bench=bench,
+                mix=mix, market=market, scenarios=[], typology_rows=len(_rows(typ)))
+
+
+def render_site_blocks(site):
+    if not site:
+        return ""
+    out = [_se.render_competition(site["comp"]), _se.render_scorecard(site["score"], site["radius"], site["labels"])]
+    if site.get("mix"):
+        out.append(_se.render_mix(site["mix"], site["bench"], site["comp"], scenarios=site.get("scenarios") or None))
+    elif site.get("comp", {}).get("n"):
+        out.append("=== PRODUCT MIX: NOT COMPUTED ===\nNo project-level flat typology is loaded for "
+                   "this city (load_typology_city.py), so no competitor-benchmarked mix exists. Say so; "
+                   "give the market flat-type absorption only, labelled as market-level, and do not "
+                   "state unit percentages.\n=== END ===")
+    return "\n\n".join(out)
+
+
+def site_score_summary(site):
+    if not site:
+        return None
+    lab = dict(zip(site.get("widths") or [], site.get("labels") or []))
+    out = []
+    for w, t in site["score"]["totals"].items():
+        out.append(dict(label=(f"Scenario {lab.get(w, '')} ({w:g} m road)" if w is not None else "Site"),
+                        total=t["total"], out_of=t["out_of"], band=t["band"]))
+    return out
+
+
+_TBL_SEP = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
+
+
+def fix_markdown_tables(text):
+    """Separate tables the model glued together.
+
+    The 18-Nov PDF printed the cost table INSIDE the area table ("Line | Rs.Cr"
+    became a data row, Land 0.00 landed in the Basis column) because the model
+    wrote the second header directly under the first table with no blank line.
+    A header row followed by a separator, directly under another table row,
+    always starts a new table."""
+    if not text:
+        return text
+    lines = text.split("\n")
+    out = []
+    for i, ln in enumerate(lines):
+        if (i + 1 < len(lines) and _TBL_SEP.match(lines[i + 1]) and ln.strip().startswith("|")
+                and out and out[-1].strip().startswith("|") and not _TBL_SEP.match(out[-1])):
+            out.append("")
+        out.append(ln)
+    return "\n".join(out)
+
+
+def finalize_report(text, site_summary=None):
+    """Deterministic clean-up of a finished report (all response paths)."""
+    if not text:
+        return text
+    text = fix_markdown_tables(text)
+    if site_summary:
+        expect = {f"{s['total']}/{s['out_of']}" for s in site_summary}
+        expect |= {f"{round(s['total'] * 80 / s['out_of'])}/80" for s in site_summary if s["out_of"]}
+        stated = set(re.findall(r"\b(\d{1,3}\s*/\s*(?:80|70|60|50|40|30))\b", text))
+        stated = {x.replace(" ", "") for x in stated}
+        wrong = sorted(x for x in stated if x not in expect)
+        if wrong:
+            text += ("\n\n> *Site score check by the system: the computed score is "
+                     + "; ".join(f"{s['label']} {s['total']}/{s['out_of']}"
+                                 + (f" (= {round(s['total'] * 80 / s['out_of'])}/80)" if s['out_of'] != 80 else "")
+                                 + f" {s['band']}" for s in site_summary)
+                     + f". The figure(s) {', '.join(wrong)} in the text above do not match it; the computed score governs.*\n")
+        return text
+    return reconcile_site_score(text)
+
+
+def build_feasibility_block(user_query, data_results, overrides=None, geo=None, site=None, history=None):
     """Return (markdown_block, diagnostic) - block is None when not applicable."""
     if not _FEAS_OK:
         return None, "calculator unavailable"
@@ -2365,17 +2572,48 @@ def build_feasibility_block(user_query, data_results, overrides=None, geo=None):
     if geo and geo.get("lat") is not None and not getattr(inp, "site_pin", None):
         inp.site_pin = f"{geo['lat']:.6f}, {geo['lng']:.6f}"
 
-    # FSI from the stated road width, out of the UDCPR table rather than a
+    # A hurdle stated earlier in the conversation ("we need net 35% profit")
+    # still governs this appraisal. The 18-Nov report argued against 35% in
+    # prose while the engine solved at its 15% default.
+    if "target_margin_pct" not in (inp.user_confirmed or []) and inp.target_margin_pct == 15.0 and _SE_OK:
+        for h in reversed(history or []):
+            if h.get("role") == "user":
+                tm = _se.parse_target_margin(h.get("content") or "")
+                if tm:
+                    inp.target_margin_pct = tm
+                    inp.notes.append(f"target margin {tm:g}% taken from your earlier message")
+                    break
+
+    # FSI from the stated road width(s), out of the UDCPR table rather than a
     # silent 2.0 that contradicts the regulatory section of the same report.
-    _udcpr = None
+    # Every width the user names is a scenario; each is appraised.
+    _udcpr, _scen = None, []
     if getattr(inp, "fsi_assumed", True) and "fsi" not in (getattr(inp, "user_confirmed", None) or []):
-        _udcpr = _udcpr_fsi(user_query, geo)
-        if _udcpr:
-            _fd, _lbl, _ = _udcpr
-            inp.fsi = _fd["max_potential_fsi"]
+        _widths = _se.parse_road_widths(user_query) if _SE_OK else []
+        _labels = _se.scenario_labels(user_query, _widths) if _SE_OK else []
+        for _w, _lab in zip(_widths, _labels):
+            _u = _udcpr_fsi(user_query, geo, road=_w)
+            if _u:
+                _scen.append(dict(label=_lab, road_m=_w, fsi=_u[0]["effective_max_fsi"],
+                                  fsi_basic=_u[0]["basic_fsi"], breakdown=_u[0], authority=_u[1], facts=_u[2]))
+        if not _scen:
+            _u = _udcpr_fsi(user_query, geo)
+            if _u:
+                _scen.append(dict(label="A", road_m=_u[0]["road_width_m"], fsi=_u[0]["effective_max_fsi"],
+                                  fsi_basic=_u[0]["basic_fsi"], breakdown=_u[0], authority=_u[1], facts=_u[2]))
+        if _scen:
+            _fd, _lbl = _scen[0]["breakdown"], _scen[0]["authority"]
+            _udcpr = (_fd, _lbl, "\n".join(x["facts"] for x in _scen))
+            # Appraised on the TOTAL building potential incl. the 60% ancillary
+            # FSI: under UDCPR staircases, lifts and lobbies are counted in FSI
+            # and bought as ancillary FSI, so leaving it out understated the
+            # saleable area by ~37% and drove a NO-GO.
+            inp.fsi = _fd["effective_max_fsi"]
+            inp.fsi_basic = _fd["basic_fsi"]
             inp.fsi_assumed = False
             inp.fsi_source = (f"UDCPR Table 6-G, {_fd['road_width_m']:g} m road, {_lbl.split(' (')[0]}: "
-                              f"basic {_fd['basic_fsi']:.2f} + premium {_fd['premium_fsi']:.2f} + TDR {_fd['tdr_loading']:.2f}")
+                              f"basic {_fd['basic_fsi']:.2f} + premium {_fd['premium_fsi']:.2f} + TDR {_fd['tdr_loading']:.2f}"
+                              f" = {_fd['max_potential_fsi']:.2f}, + ancillary {_fd['ancillary_fsi']:.2f}")
             if not getattr(inp, "fsi_authority", None):
                 inp.fsi_authority = _lbl
     _udcpr_facts = _udcpr[2] if _udcpr else ""
@@ -2395,6 +2633,19 @@ def build_feasibility_block(user_query, data_results, overrides=None, geo=None):
     if str(lf_detail).startswith("ABSTAINED"):
         return None, lf_detail
 
+    _mix = (site or {}).get("mix")
+    if inp.price_psf is None and _mix and _mix.get("mix_psf"):
+        # Revenue is built from the recommended configuration mix, each priced
+        # at what the fastest-selling competitors within the radius achieve -
+        # not a city average applied to an unspecified product.
+        inp.price_psf = float(_mix["mix_psf"])
+        inp.price_psf_source = (
+            f"LF project typology, {lf_qtr or 'latest quarter'}: recommended mix priced at the fastest-selling "
+            f"competitors within {site['radius']:g} km ({_mix['n_projects']} projects)"
+            + (f"; market {lf_basis} price Rs.{int(lf_price):,} for reference" if lf_price else ""))
+    if _mix and _mix.get("avg_size") and "avg_unit_sqft" not in (inp.user_confirmed or []):
+        inp.avg_unit_sqft = float(_mix["avg_size"])
+        inp.avg_unit_source = f"LF project typology - weighted average of the recommended mix"
     if inp.price_psf is None and lf_price:
         inp.price_psf = lf_price
         inp.price_psf_source = (
@@ -2438,9 +2689,26 @@ def build_feasibility_block(user_query, data_results, overrides=None, geo=None):
         return block, "ABSTAINED (block states the gap): " + ", ".join(missing)
     try:
         from feasibility import compute_with_launch_plan as _feas_full
-        block = _feas_render(_feas_full(inp))
+        _res = _feas_full(inp)
+        block = _feas_render(_res)
     except Exception as e:
         return None, f"compute error: {e}"
+    _scen_block = ""
+    if _scen:
+        try:
+            from feasibility import compute_scenarios, render_scenarios, SQFT_PER_ACRE
+            _rows_sc = compute_scenarios(inp, _scen)
+            _scen_block = render_scenarios(_rows_sc, acres=inp.plot_sqft / SQFT_PER_ACRE)
+            if len(_scen) > 1:
+                block = block.replace("=== COMPUTED FEASIBILITY (AUTHORITATIVE - DO NOT RECALCULATE) ===",
+                                      f"=== COMPUTED FEASIBILITY - DETAIL FOR SCENARIO {_scen[0]['label']} "
+                                      f"({_scen[0]['road_m']:g} m road) (AUTHORITATIVE - DO NOT RECALCULATE) ===", 1)
+            if site is not None:
+                site["scenarios"] = [(x["label"], x["road_m"], x["result"]["areas"]["saleable_sqft"]) for x in _rows_sc]
+        except Exception as e:
+            _scen_block = f"=== SCENARIOS NOT COMPUTED ({e}) ==="
+    elif site is not None:
+        site["scenarios"] = [(None, None, _res["areas"]["saleable_sqft"])]
 
     # State the price and its vintage inside the block. A stale input caused a
     # report to carry NO-GO in its verdict and GO in its economics; making the
@@ -2449,10 +2717,14 @@ def build_feasibility_block(user_query, data_results, overrides=None, geo=None):
     header = (
         f"> **Price basis for every figure below: Rs.{int(inp.price_psf):,} PSF"
         f"{' (carpet)' if want_carpet else ' (saleable)'}"
-        f" - LF {lf_basis or 'price'}, {lf_qtr or 'latest available quarter'}.**\n"
-        "> This is the latest quarter in the LF series. If any LF figure quoted "
-        "elsewhere in this report contradicts it, STOP: report the discrepancy "
-        "as the finding and do not issue a verdict.\n"
+        f" - {inp.price_psf_source}.**\n"
+        + ("> The price is the recommended configuration mix priced at the competition set, so it "
+           "differs from the market-wide absorption price quoted in the market section. That difference "
+           "is expected and must be stated, not treated as a fault.\n"
+           if str(inp.price_psf_source).startswith("LF project typology") else
+           "> This is the latest quarter in the LF series. If any LF figure quoted "
+           "elsewhere in this report contradicts it, STOP: report the discrepancy "
+           "as the finding and do not issue a verdict.\n")
     )
     # EVERY feasibility report carries its inputs and their provenance. A plot
     # sanctioned at FAR 3.0 was appraised at 2.5 because the assumption was
@@ -2465,7 +2737,7 @@ def build_feasibility_block(user_query, data_results, overrides=None, geo=None):
         "not restate a DEFAULT as though it were supplied or derived.\n"
         + _qual_summary(inp) + "\n"
     )
-    return (header + "\n" + block + "\n" + inputs_table
+    return (header + "\n" + (_scen_block + "\n\n" if _scen_block else "") + block + "\n" + inputs_table
             + ("\n" + _udcpr_facts if _udcpr_facts else "")), f"computed [{lf_detail}]"
 
 
@@ -2574,6 +2846,10 @@ def _run_job(job_id, payload):
                             j["text"] += ev.get("text", "")
                         elif et == "done":
                             j["meta"] = ev
+                            try:
+                                j["final_text"] = finalize_report(j["text"], ev.get("site_score"))
+                            except Exception as e:
+                                print(f"  [ASYNC] finalize failed: {e}")
                             j["status"] = "done"
                         elif et == "error":
                             j["error"] = ev.get("text")
@@ -2581,6 +2857,14 @@ def _run_job(job_id, payload):
                         j["updated"] = _time.time()
         with _JOBS_LOCK:
             j = _JOBS.get(job_id)
+            if j:
+                # Deterministic clean-up of the whole report (glued tables,
+                # score check). Served as final_text; the streamed text stays
+                # as it was so the client's cursor never goes backwards.
+                try:
+                    j["final_text"] = finalize_report(j["text"], (j.get("meta") or {}).get("site_score"))
+                except Exception as e:
+                    print(f"  [ASYNC] finalize failed: {e}")
             if j and j["status"] == "running":
                 # Generator finished without a 'done' event. Not fatal - the text
                 # collected so far is real - but say so rather than hanging.
@@ -2700,6 +2984,7 @@ def poll_query_job(job_id):
             }), 404
         text, status = j["text"], j["status"]
         meta, err, partial = j["meta"], j["error"], j["partial"]
+        final_text = j.get("final_text")
         elapsed = _time.time() - j["created"]
 
     return jsonify({
@@ -2708,6 +2993,7 @@ def poll_query_job(job_id):
         "cursor": len(text),
         "elapsed_secs": round(elapsed, 1),
         "partial": partial,
+        "final_text": final_text if status != "running" else None,
         "done_meta": meta,
         "error": err,
     })

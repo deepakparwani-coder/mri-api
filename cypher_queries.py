@@ -53,9 +53,82 @@ QUERY_DEFINITIONS = {
                    p.saleable_rate_psf        AS saleable_psf,
                    p.carpet_rate_psf          AS carpet_psf,
                    p.monthly_velocity         AS velocity,
-                   p.annual_months_inv        AS months_inventory
+                   p.annual_months_inv        AS months_inventory,
+                   coalesce(p.unsold_units,
+                            CASE WHEN p.total_supply_units IS NOT NULL AND p.unsold_pct IS NOT NULL
+                                 THEN round(p.total_supply_units * p.unsold_pct / 100.0) END) AS unsold_units,
+                   coalesce(p.launch_month_year, p.launch_date)        AS launch,
+                   coalesce(p.possession_month_year, p.possession_date) AS possession,
+                   p.cagr_3yr_pct             AS cagr_3yr,
+                   p.flat_types               AS configs
             ORDER BY km
-            LIMIT 15
+            LIMIT 80
+        """,
+    },
+
+    "pin_typology": {
+        "description": (
+            "Per-project FLAT TYPOLOGY for every LF project within radius_km of the "
+            "pin: for each configuration a project offers - supply units, sold "
+            "units, saleable and carpet size lists, rate PSF (absorption, "
+            "weighted-average, average) and ticket range in lakhs. This is the "
+            "competition benchmark for a product-mix recommendation. Consumed by "
+            "the site engine; the computed PRODUCT MIX block is what the report uses."
+        ),
+        "cypher": """
+            MATCH (p:Project {city_name: $city})
+            WHERE p.location IS NOT NULL
+            WITH p, point.distance(p.location,
+                     point({latitude: $lat, longitude: $lng})) / 1000.0 AS km
+            WHERE km <= $radius_km
+            MATCH (p)-[:HAS_TYPOLOGY]->(t:FlatTypology)
+            RETURN round(km * 10) / 10       AS distance_km,
+                   p.name                    AS project,
+                   p.monthly_velocity        AS project_velocity,
+                   p.annual_sales_units      AS project_annual_sales,
+                   t.flat                    AS flat,
+                   t.supply_units            AS supply_units,
+                   t.sold_units              AS sold_units,
+                   t.saleable_sizes          AS saleable_sizes,
+                   t.carpet_sizes            AS carpet_sizes,
+                   t.min_saleable            AS min_saleable,
+                   t.max_saleable            AS max_saleable,
+                   t.min_carpet              AS min_carpet,
+                   t.max_carpet              AS max_carpet,
+                   t.absorption_rate         AS absorption_rate,
+                   t.wtavg_rate              AS wtavg_rate,
+                   t.avg_rate                AS avg_rate,
+                   t.min_cost_lacs           AS min_cost_lacs,
+                   t.max_cost_lacs           AS max_cost_lacs
+            ORDER BY km
+            LIMIT 600
+        """,
+    },
+
+    "pin_poi": {
+        "description": (
+            "Points of interest near the pin from the city's OpenStreetMap layer "
+            "(metro/rail stations, IT parks, hospitals, malls, schools, colleges) "
+            "with true distances. Consumed by the site engine's scorecard."
+        ),
+        "cypher": """
+            MATCH (x:POI {city_name: $city})
+            WHERE x.location IS NOT NULL
+            WITH x, point.distance(x.location,
+                     point({latitude: $lat, longitude: $lng})) / 1000.0 AS km
+            WHERE km <= $radius_km
+            RETURN x.category AS category, x.name AS name,
+                   round(km * 100) / 100 AS distance_km, x.status AS status
+            ORDER BY km
+            LIMIT 800
+        """,
+    },
+
+    "poi_count": {
+        "description": "How many OpenStreetMap POIs are loaded for the city (0 = layer not loaded).",
+        "cypher": """
+            MATCH (x:POI {city_name: $city})
+            RETURN count(x) AS n
         """,
     },
 

@@ -62,6 +62,12 @@ class FeasibilityInputs:
 
     fsi: float = 2.0
     fsi_assumed: bool = True
+    # UDCPR: everything above basic FSI (premium, TDR, ancillary) is BOUGHT.
+    # fsi_basic marks the free part; fsi_purchase_psf is the all-in cost per
+    # sq.ft of purchased FSI area. None = not supplied -> the report shows the
+    # land ceiling as a function of it instead of pretending it is zero.
+    fsi_basic: Optional[float] = None
+    fsi_purchase_psf: Optional[float] = None
     fsi_authority: Optional[str] = None    # who sanctioned it, under what instrument
     site_pin: Optional[str] = None         # lat,lng or Maps link, for the benchmark set
 
@@ -317,6 +323,12 @@ QUALIFIER_FIELDS = [
               "Who sanctioned it, under what instrument (e.g. 'GBA, premium "
               "FAR on a 60ft road, notified Jan 2026'). Printed in the report "
               "as the authority for the figure above.", kind="text"),
+    QualField("fsi_purchase_psf", "FSI purchase cost", GROUP_ASSUMED,
+              "Rs. per sq.ft of purchased FSI",
+              "All-in cost of the FSI above basic - premium FSI, TDR and ancillary "
+              "FSI premium - per sq.ft of that purchased area. Left blank, the "
+              "report shows the land ceiling at Rs.0 / 1,000 / 2,000 / 3,000 per "
+              "sq.ft rather than assuming a rate."),
     QualField("land_cost_cr", "Land cost", GROUP_ASSUMED, "Rs. Cr (total)",
               "Leave blank and the report solves for the MAXIMUM viable land "
               "cost instead of testing one."),
@@ -391,6 +403,7 @@ def qualifier_spec(inp=None, lf_price=None, lf_price_source="",
             _rec = {"price_psf": getattr(inp, "price_psf_source", "") or "",
                     "monthly_velocity_pct": getattr(inp, "velocity_source", "") or "",
                     "fsi": getattr(inp, "fsi_source", "") or "",
+                    "avg_unit_sqft": getattr(inp, "avg_unit_source", "") or "",
                     "fsi_authority": ("UDCPR module, from the pin's location - confirm"
                                       if (getattr(inp, "fsi_source", "") or "").startswith("UDCPR") else "")
                     }.get(f.key, "")
@@ -404,6 +417,9 @@ def qualifier_spec(inp=None, lf_price=None, lf_price_source="",
                 value, status, source = cur, "derived", _rec
             elif f.key == "monthly_velocity_pct" and cur is None and lf_velocity:
                 value, status, source = lf_velocity, "derived", "LF absorption series"
+            elif f.key == "target_margin_pct" and not confirmed and any(
+                    "earlier message" in n for n in (getattr(inp, "notes", None) or [])):
+                value, status, source = cur, "supplied", "from your earlier message"
             elif cur is not None and (confirmed or cur != default):
                 value, status, source = cur, "supplied", (
                     "confirmed by you" if confirmed else "read from your question")
@@ -427,7 +443,9 @@ def qualifier_spec(inp=None, lf_price=None, lf_price_source="",
             # the FSI authority. Saying "engine default" here would imply a
             # number was applied when none was.
             source = ("blank - the report solves for the maximum viable land cost"
-                      if f.key == "land_cost_cr" else "not stated")
+                      if f.key == "land_cost_cr" else
+                      "not supplied - land ceiling shown against a range of rates"
+                      if f.key == "fsi_purchase_psf" else "not stated")
 
         out.append({"key": f.key, "label": f.label, "group": f.group,
                     "unit": f.unit, "help": f.help, "kind": f.kind,
@@ -636,6 +654,24 @@ def parse_feasibility_inputs(text: str) -> Optional[FeasibilityInputs]:
     m = re.search(r'avg\w*\s*(?:unit|flat)?\s*(?:size)?[^.]{0,15}?' + _NUM + r'\s*sq', low)
     if m: inp.avg_unit_sqft = _f(m.group(1))
 
+    # ── target margin ("net 35% profit", "35% margin", "hurdle 30%") ──
+    # The 18-Nov report judged a land bid against a 35% hurdle in its prose
+    # while the engine solved at its 15% default: the number the user asked for
+    # never reached the arithmetic.
+    try:
+        from site_engine import parse_target_margin
+        tm = parse_target_margin(text)
+    except Exception:
+        tm = None
+    if tm:
+        inp.target_margin_pct = tm
+
+    # ── FSI purchase cost (premium / TDR / ancillary), Rs per sq.ft ──
+    m = re.search(r'(?:premium|tdr|fsi purchase|ancillary)[^.]{0,40}?(?:rs\s*)?' + _NUM
+                  + r'\s*(?:psf|per sq|/\s*sq|sq\.?\s?ft)', low)
+    if m:
+        inp.fsi_purchase_psf = _f(m.group(1))
+
     return inp
 
 
@@ -665,7 +701,7 @@ def irr(flows: list, lo: float = -0.95, hi: float = 10.0, tol: float = 1e-7) -> 
 
 # ── The model ────────────────────────────────────────────────────────────────
 def _cost_stack(inp: FeasibilityInputs, bua: float, revenue_cr: float,
-                land_cr: float) -> dict:
+                land_cr: float, fsi_purchase_cr: float = 0.0) -> dict:
     construction_cr = bua * inp.construction_psf / CR
     approvals_cr = construction_cr * inp.approval_pct / 100.0
     professional_cr = construction_cr * inp.professional_pct / 100.0
@@ -674,8 +710,8 @@ def _cost_stack(inp: FeasibilityInputs, bua: float, revenue_cr: float,
                   * inp.finance_rate_pct / 100.0 * inp.project_years)
     contingency_cr = (construction_cr + approvals_cr) * inp.contingency_pct / 100.0
     total_cr = (land_cr + construction_cr + approvals_cr + professional_cr
-                + marketing_cr + finance_cr + contingency_cr)
-    return dict(land_cr=land_cr, construction_cr=construction_cr,
+                + marketing_cr + finance_cr + contingency_cr + fsi_purchase_cr)
+    return dict(land_cr=land_cr, fsi_purchase_cr=fsi_purchase_cr, construction_cr=construction_cr,
                 approvals_cr=approvals_cr, professional_cr=professional_cr,
                 marketing_cr=marketing_cr, finance_cr=finance_cr,
                 contingency_cr=contingency_cr, total_cr=total_cr,
@@ -701,34 +737,52 @@ def compute(inp: FeasibilityInputs) -> dict:
     units = saleable / inp.avg_unit_sqft
 
     revenue_cr = saleable * price / CR
-    land_cr = inp.land_cost_cr if inp.land_cost_cr is not None else 0.0
+    purchased_area = net * max(0.0, inp.fsi - inp.fsi_basic) if inp.fsi_basic is not None else 0.0
+    fsi_purchase_cr = purchased_area * (inp.fsi_purchase_psf or 0.0) / CR
     # construction_psf is quoted PER SQ.FT OF BUILT-UP AREA (all floors) - the
     # filed K-RERA median on that basis is Rs.2,705. Costing the FSI area
     # instead understated construction by ~29%.
-    costs = _cost_stack(inp, construction_area, revenue_cr, land_cr)
+    nonland = _cost_stack(inp, construction_area, revenue_cr, 0.0, fsi_purchase_cr)
+    margin_before_land = ((revenue_cr - nonland["total_cr"]) / revenue_cr * 100.0) if revenue_cr else 0.0
+
+    # maximum land cost that still clears the target margin
+    target = inp.target_margin_pct / 100.0
+    max_land_cr = revenue_cr * (1 - target) - nonland["non_land_cr"]
+
+    # With no land price supplied the appraisal is SOLVED at the bid ceiling.
+    # It used to run every downstream figure at land = 0, which printed a
+    # 219.7% IRR and a 9.6x equity multiple for a project with no land cost -
+    # numbers that mean nothing and that a developer reads as a broken model.
+    land_solved = inp.land_cost_cr is None
+    if land_solved:
+        land_cr = max(0.0, max_land_cr)
+    else:
+        land_cr = inp.land_cost_cr
+    costs = _cost_stack(inp, construction_area, revenue_cr, land_cr, fsi_purchase_cr)
 
     profit_cr = revenue_cr - costs["total_cr"]
     margin_rev = profit_cr / revenue_cr * 100.0 if revenue_cr else 0.0
     margin_cost = profit_cr / costs["total_cr"] * 100.0 if costs["total_cr"] else 0.0
     breakeven_psf = costs["total_cr"] * CR / saleable if saleable else 0.0
 
-    # maximum land cost that still clears the target margin
-    target = inp.target_margin_pct / 100.0
-    max_land_cr = revenue_cr * (1 - target) - costs["non_land_cr"]
-
     # ── sensitivity: land cost x selling price, computed cell by cell ────────
-    if inp.land_cost_cr:
+    if inp.land_cost_cr and not land_solved:
         base = inp.land_cost_cr
         land_axis = sorted({round(max(0.5, base * f), 2) for f in (0.6, 0.8, 1.0, 1.4, 1.8, 2.2)})
-    else:
+    elif max_land_cr > 0:
         land_axis = [round(max_land_cr * f, 2) for f in (0.6, 0.8, 1.0, 1.2)]
+    else:
+        # No land value at the target: span what the land is worth at a 15%
+        # margin instead of printing negative land prices.
+        alt = revenue_cr * 0.85 - nonland["non_land_cr"]
+        land_axis = [round(alt * f, 2) for f in (0.25, 0.5, 0.75, 1.0)] if alt > 0 else [0.0]
     price_axis = sorted({int(round(price * f)) for f in (0.85, 0.925, 1.0, 1.10, 1.20)})
     grid = []
     for lc in land_axis:
         row = {"land_cr": lc, "cells": []}
         for p in price_axis:
             rev = saleable * p / CR
-            cs = _cost_stack(inp, construction_area, rev, lc)
+            cs = _cost_stack(inp, construction_area, rev, lc, fsi_purchase_cr)
             pr = rev - cs["total_cr"]
             row["cells"].append({"price_psf": p,
                                  "margin_pct": round(pr / rev * 100.0, 1) if rev else 0.0,
@@ -741,11 +795,11 @@ def compute(inp: FeasibilityInputs) -> dict:
     build_curve = _spread(yrs)
     collect_lag = 0.35                       # share of a year's bookings collected later
     flows, table, cum = [], [], 0.0
-    y0_out = -(land_cr + costs["approvals_cr"])
+    y0_out = -(land_cr + costs["approvals_cr"] + fsi_purchase_cr)
     flows.append(y0_out); cum += y0_out
     table.append(dict(year=0, label="Pre-launch", revenue_cr=0.0, collections_cr=0.0,
                       construction_cr=round(-costs["approvals_cr"], 2),
-                      other_cr=round(-land_cr, 2), net_cr=round(y0_out, 2),
+                      other_cr=round(-(land_cr + fsi_purchase_cr), 2), net_cr=round(y0_out, 2),
                       cumulative_cr=round(cum, 2)))
     carried = 0.0
     other_annual = (costs["professional_cr"] + costs["marketing_cr"]
@@ -788,7 +842,11 @@ def compute(inp: FeasibilityInputs) -> dict:
                                    units_per_month=round(per_month, 1),
                                    months_to_sell=round(units / per_month, 0) if per_month else None))
 
-    equity = land_cr + costs["approvals_cr"] + max(0.0, -min(r["cumulative_cr"] for r in table))
+    equity = max(0.0, -min(r["cumulative_cr"] for r in table))
+    # Solved land of zero means the project misses the hurdle before paying for
+    # land at all. An IRR or equity multiple on a free plot is not a return
+    # anyone can earn; print none rather than 206%.
+    no_land_value = land_solved and max_land_cr <= 0
     return dict(
         inputs=asdict(inp),
         # There is deliberately NO "bua_sqft" key. It was kept briefly as an
@@ -800,7 +858,9 @@ def compute(inp: FeasibilityInputs) -> dict:
                    fsi_area_sqft=round(fsi_area),
                    construction_area_sqft=round(construction_area),
                    saleable_sqft=round(saleable), carpet_sqft=round(carpet),
-                   units=round(units)),
+                   units=round(units), purchased_fsi_sqft=round(purchased_area)),
+        land_solved=land_solved,
+        margin_before_land_pct=round(margin_before_land, 1),
         revenue_cr=round(revenue_cr, 2), price_psf=price,
         costs={k: round(v, 2) for k, v in costs.items()},
         profit_cr=round(profit_cr, 2),
@@ -817,10 +877,11 @@ def compute(inp: FeasibilityInputs) -> dict:
                              total_cost_cr=round(costs["total_cr"], 2),
                              collections_reconcile=abs(total_in - revenue_cr) < 0.05,
                              outflows_reconcile=abs(total_out - costs["total_cr"]) < 0.05),
-        irr_pct=round(project_irr * 100.0, 1) if project_irr is not None else None,
+        irr_pct=(round(project_irr * 100.0, 1) if project_irr is not None and not no_land_value else None),
+        no_land_value=no_land_value,
         npv_cr={f"{r}%": round(npv(r / 100.0, flows), 2) for r in (12, 15, 18)},
         peak_equity_cr=round(equity, 2),
-        equity_multiple=round((equity + profit_cr) / equity, 2) if equity > 0 else None,
+        equity_multiple=(round((equity + profit_cr) / equity, 2) if equity > 0 and not no_land_value else None),
         absorption=absorption,
     )
 
@@ -946,7 +1007,7 @@ def compute_launch_plan(inp: FeasibilityInputs, base_result: dict) -> dict:
                 collections[yrs] += amount * mid
             collections[yrs] += amount * ps       # OC tranche
 
-        f = [-(c["land_cr"] + c["approvals_cr"])]
+        f = [-(c["land_cr"] + c["approvals_cr"] + c.get("fsi_purchase_cr", 0.0))]
         for i in range(yrs):
             f.append(collections[i] - c["construction_cr"] / yrs - other_total / yrs)
         f.append(collections[yrs])
@@ -985,7 +1046,7 @@ def compute_launch_plan(inp: FeasibilityInputs, base_result: dict) -> dict:
     down_realised = prices[0]
     c = base_result["costs"]
     down_cost = _cost_stack(inp, base_result["areas"]["construction_area_sqft"],
-                            down_rev, c["land_cr"])
+                            down_rev, c["land_cr"], c.get("fsi_purchase_cr", 0.0))
     downside = dict(label="Escalation not achieved - all phases near launch price",
                     realised_psf=round(down_realised),
                     revenue_cr=round(down_rev, 2),
@@ -1032,12 +1093,14 @@ def render_markdown(r: dict) -> str:
              "recompute any of them. If a number you want is not here, say it was "
              "not computed rather than inventing it.")
     L.append("")
-    L.append(f"**Inputs used** - plot {i['plot_input_text'] or str(i['plot_sqft'])+' sqft'}, "
+    L.append(f"**Inputs used** - plot {a['gross_sqft']:,} sq.ft ({a['gross_sqft'] / SQFT_PER_ACRE:,.2f} acre), "
              f"FSI {i['fsi']}{' (assumed)' if i['fsi_assumed'] else ''}, "
              f"deductions {i['deduction_pct']}%, loading {i['loading_pct']}%, "
              f"construction Rs.{i['construction_psf']:,.0f} PSF, "
              f"price Rs.{r['price_psf']:,.0f} PSF ({i['price_psf_source']}), "
-             f"land Rs.{i['land_cost_cr']} Cr, term {i['project_years']} years.")
+             + (f"land SOLVED at the bid ceiling for a {i['target_margin_pct']}% margin (Rs.{c['land_cr']:,.2f} Cr), "
+                if r.get("land_solved") else f"land Rs.{i['land_cost_cr']} Cr, ")
+             + f"term {i['project_years']} years.")
     L.append("")
     L.append("**Area**")
     L.append("")
@@ -1052,12 +1115,18 @@ def render_markdown(r: dict) -> str:
     L.append(f"| RERA carpet | saleable x {i['carpet_factor']} "
              f"({i['carpet_factor_source']}) | {a['carpet_sqft']:,} sq.ft |")
     L.append(f"| Units | saleable / {i['avg_unit_sqft']:,.0f} sq.ft | {a['units']:,} |")
+    if a.get("purchased_fsi_sqft"):
+        L.append(f"| Purchased FSI area | net x (FSI {i['fsi']} - basic {i['fsi_basic']}) - premium, TDR and ancillary | {a['purchased_fsi_sqft']:,} sq.ft |")
     L.append("")
     L.append("**Cost and return**")
     L.append("")
     L.append("| Line | Rs. Cr |")
     L.append("|---|---|")
-    L.append(f"| Land | {_inr(c['land_cr'])} |")
+    L.append(f"| Land{' (solved: bid ceiling at ' + str(i['target_margin_pct']) + '% margin)' if r.get('land_solved') else ''} | {_inr(c['land_cr'])} |")
+    if a.get("purchased_fsi_sqft"):
+        L.append(f"| FSI purchase (premium + TDR + ancillary at "
+                 + (f"Rs.{i['fsi_purchase_psf']:,.0f}/sq.ft" if i.get('fsi_purchase_psf') else "Rs.0 - RATE NOT SUPPLIED") + ") | "
+                 f"{_inr(c.get('fsi_purchase_cr', 0.0))} |")
     L.append(f"| Construction | {_inr(c['construction_cr'])} |")
     L.append(f"| Approvals ({i['approval_pct']}%) | {_inr(c['approvals_cr'])} |")
     L.append(f"| Professional ({i['professional_pct']}%) | {_inr(c['professional_cr'])} |")
@@ -1068,11 +1137,17 @@ def render_markdown(r: dict) -> str:
     L.append(f"| **Revenue** | **{_inr(r['revenue_cr'])}** |")
     L.append(f"| **Net profit** | **{_inr(r['profit_cr'])}** |")
     L.append("")
-    L.append(f"- Margin on revenue: **{r['margin_on_revenue_pct']}%** | Margin on cost: {r['margin_on_cost_pct']}%")
+    L.append(f"- Margin on revenue BEFORE land: **{r['margin_before_land_pct']}%**")
+    L.append(f"- Margin on revenue{' at the solved land price' if r.get('land_solved') else ''}: **{r['margin_on_revenue_pct']}%** | Margin on cost: {r['margin_on_cost_pct']}%")
     L.append(f"- Breakeven: **Rs.{r['breakeven_psf']:,} PSF** (cushion Rs.{r['price_cushion_psf']:,} PSF below market)")
     if r["max_viable_land_cr"] > 0:
         L.append(f"- Maximum viable land cost at {i['target_margin_pct']}% margin: "
                  f"**Rs.{r['max_viable_land_cr']} Cr**")
+    elif r.get("margin_before_land_pct", 0) > 0:
+        L.append(f"- Maximum viable land cost at {i['target_margin_pct']}% margin: **none** - the project "
+                 f"earns {r['margin_before_land_pct']}% on revenue BEFORE paying for land, below the "
+                 f"{i['target_margin_pct']}% hurdle, so no land price meets it. The scenario table shows the "
+                 f"land ceiling at lower hurdles.")
     else:
         # A negative figure here is arithmetically real but meaningless as a
         # price - it says the build does not cover itself at this selling price,
@@ -1082,9 +1157,14 @@ def render_markdown(r: dict) -> str:
                  f"**none** - at Rs.{r['price_psf']:,} PSF the project does not "
                  f"cover its construction and financing, so no land price makes "
                  f"it viable. Check the selling price before reading further.")
-    L.append(f"- Project IRR: **{r['irr_pct']}%**" if r["irr_pct"] is not None else "- Project IRR: not computable")
+    _at = " (land paid at the bid ceiling)" if r.get("land_solved") else ""
+    L.append(f"- Project IRR{_at}: **{r['irr_pct']}%**" if r["irr_pct"] is not None else
+             ("- Project IRR: not meaningful - with no land value at the hurdle it would be a return on a free plot"
+              if r.get("no_land_value") else "- Project IRR: not computable"))
     L.append(f"- NPV: " + " | ".join(f"{k} Rs.{v} Cr" for k, v in r["npv_cr"].items()))
-    L.append(f"- Peak equity Rs.{r['peak_equity_cr']} Cr | Equity multiple {r['equity_multiple']}x")
+    L.append(f"- Peak equity Rs.{r['peak_equity_cr']} Cr | Equity multiple "
+             + (f"{r['equity_multiple']}x" if r['equity_multiple'] is not None else
+                "not meaningful (no land value at the hurdle)" if r.get('no_land_value') else "n/a"))
     L.append("")
     L.append("**Sensitivity - margin % by land cost and selling price**")
     L.append("")
@@ -1136,8 +1216,10 @@ def render_markdown(r: dict) -> str:
         L.append("| Strategy | Sell-out | Finance (Rs.Cr) | IRR | NPV @15% (Rs.Cr) |")
         L.append("|---|---|---|---|---|")
         for cmp_ in lp["comparison"]:
+            _irr = ("n/m (no land value)" if r.get("no_land_value") else
+                    "-" if cmp_['irr_pct'] is None else f"{cmp_['irr_pct']}%")
             L.append(f"| {cmp_['label']} | {cmp_['years']}y | {cmp_['finance_cr']} | "
-                     f"{cmp_['irr_pct']}% | {cmp_['npv15_cr']} |")
+                     f"{_irr} | {cmp_['npv15_cr']} |")
         L.append("")
         L.append(f"- Ladder at the SAME sell-out: **{lp['ladder_vs_flat_npv_cr']:+} Cr** NPV vs flat pricing.")
         L.append(f"- Ladder that compresses the sell-out: **{lp['compressed_vs_flat_npv_cr']:+} Cr** NPV vs flat.")
@@ -1159,6 +1241,105 @@ def render_markdown(r: dict) -> str:
         L.append("Notes: " + "; ".join(i["notes"]))
     L.append("")
     L.append("=== END COMPUTED FEASIBILITY ===")
+    return "\n".join(L)
+
+
+# ── Road-width scenarios ─────────────────────────────────────────────────────
+PURCHASE_GRID = (0, 1000, 2000, 3000)
+
+
+def compute_scenarios(base_inp: FeasibilityInputs, scenarios: list) -> list:
+    """One appraisal per road-width scenario.
+
+    scenarios: [{label, road_m, fsi, fsi_basic, breakdown, source}] where fsi
+    is the TOTAL building potential (basic + premium + TDR + ancillary).
+    When the FSI purchase rate is unknown each scenario also carries the land
+    ceiling at a grid of rates, so the bid is never quoted as if FSI were free.
+    """
+    import copy
+    out = []
+    for sc in scenarios:
+        inp = copy.deepcopy(base_inp)
+        inp.fsi, inp.fsi_basic, inp.fsi_assumed = sc["fsi"], sc.get("fsi_basic"), False
+        res = compute_with_launch_plan(inp)
+        grid = []
+        rates = PURCHASE_GRID if inp.fsi_purchase_psf is None else (inp.fsi_purchase_psf,)
+        margins = sorted({15.0, 20.0, 25.0, float(inp.target_margin_pct)})
+        for rate in rates:
+            i2 = copy.deepcopy(inp)
+            i2.fsi_purchase_psf = rate
+            r2 = compute(i2)
+            rev, nonland = r2["revenue_cr"], r2["costs"]["non_land_cr"]
+            grid.append(dict(rate=rate, purchase_cr=r2["costs"]["fsi_purchase_cr"],
+                             margin_before_land_pct=r2["margin_before_land_pct"],
+                             ceilings={m: round(rev * (1 - m / 100.0) - nonland, 2) for m in margins}))
+        out.append(dict(sc, inp=inp, result=res, grid=grid))
+    return out
+
+
+def render_scenarios(rows: list, acres: Optional[float] = None) -> str:
+    if not rows:
+        return ""
+    labs = [f"Scenario {r['label']} - {r['road_m']:g} m road" for r in rows]
+    L = ["=== COMPUTED SCENARIOS (AUTHORITATIVE - REPRODUCE THIS TABLE, DO NOT RECALCULATE) ===",
+         "One appraisal per road width the user stated. FSI is the UDCPR Table 6-G building "
+         "potential for that width INCLUDING the 60% residential ancillary FSI (Reg. 6.3 Note i), "
+         "because under UDCPR staircases, lifts and lobbies count against FSI and are bought as "
+         "ancillary FSI. Everything above basic 1.10 is purchased.", "",
+         "| Line | " + " | ".join(labs) + " |", "|---" * (len(rows) + 1) + "|"]
+
+    def row(name, f):
+        L.append(f"| {name} | " + " | ".join(f(r) for r in rows) + " |")
+    row("FSI build-up", lambda r: (f"basic {r['breakdown']['basic_fsi']:.2f} + premium {r['breakdown']['premium_fsi']:.2f} + "
+                                   f"TDR {r['breakdown']['tdr_loading']:.2f} = {r['breakdown']['max_potential_fsi']:.2f}; "
+                                   f"+ ancillary {r['breakdown']['ancillary_fsi']:.2f}"))
+    row("Total FSI used", lambda r: f"{r['fsi']:.2f}")
+    row("FSI area", lambda r: f"{r['result']['areas']['fsi_area_sqft']:,} sq.ft")
+    row("Purchased FSI area", lambda r: f"{r['result']['areas']['purchased_fsi_sqft']:,} sq.ft")
+    row("Construction area", lambda r: f"{r['result']['areas']['construction_area_sqft']:,} sq.ft")
+    row("Saleable area", lambda r: f"{r['result']['areas']['saleable_sqft']:,} sq.ft")
+    row("RERA carpet", lambda r: f"{r['result']['areas']['carpet_sqft']:,} sq.ft")
+    row("Units", lambda r: f"{r['result']['areas']['units']:,}")
+    row("Revenue (Rs.Cr)", lambda r: f"{r['result']['revenue_cr']:,.2f}")
+    for k, nm in (("construction_cr", "Construction"), ("approvals_cr", "Approvals"),
+                  ("professional_cr", "Professional"), ("marketing_cr", "Marketing"),
+                  ("finance_cr", "Finance"), ("contingency_cr", "Contingency"),
+                  ("fsi_purchase_cr", "FSI purchase")):
+        row(f"{nm} (Rs.Cr)", lambda r, k=k: f"{r['result']['costs'][k]:,.2f}")
+    row("Cost before land (Rs.Cr)", lambda r: f"{r['result']['costs']['non_land_cr']:,.2f}")
+    row("Margin before land", lambda r: f"{r['result']['margin_before_land_pct']}%")
+    tm = rows[0]["inp"].target_margin_pct
+    row(f"Land bid ceiling at {tm:g}% margin (Rs.Cr)",
+        lambda r: (f"{r['result']['max_viable_land_cr']:,.2f}" if r['result']['max_viable_land_cr'] > 0 else "none - below hurdle even at zero land"))
+    if acres:
+        row("  per acre (Rs.Cr)", lambda r: (f"{r['result']['max_viable_land_cr'] / acres:,.2f}" if r['result']['max_viable_land_cr'] > 0 else "-"))
+    row("Breakeven PSF", lambda r: f"Rs.{r['result']['breakeven_psf']:,}" + (" (at zero land)" if r['result'].get('no_land_value') else " (land at ceiling)"))
+    row("IRR (land paid at ceiling)", lambda r: ("not meaningful - no land value at the hurdle" if r['result'].get('no_land_value')
+                                                 else "-" if r['result']['irr_pct'] is None else f"{r['result']['irr_pct']}%"))
+    row("NPV @15% (Rs.Cr)", lambda r: f"{r['result']['npv_cr']['15%']:,.2f}")
+    row("Peak equity (Rs.Cr)", lambda r: f"{r['result']['peak_equity_cr']:,.2f}")
+    row("Equity multiple", lambda r: "-" if r['result']['equity_multiple'] is None else f"{r['result']['equity_multiple']}x")
+    row("Units / month to sell out in term", lambda r: f"{r['result']['areas']['units'] / (r['inp'].project_years * 12):.1f}")
+    base_abs = [a for a in rows[0]["result"]["absorption"] if a["scenario"] == "Base"]
+    if base_abs:
+        row("Sell-out at LF velocity", lambda r: next((f"{a['months_to_sell']:.0f} months" for a in r['result']['absorption'] if a['scenario'] == 'Base'), "-"))
+    margins = sorted(rows[0]["grid"][0]["ceilings"])
+    unknown = rows[0]["inp"].fsi_purchase_psf is None
+    L += ["", "**Land bid ceiling (Rs.Cr) by required margin" + (" and FSI purchase rate" if unknown else "") + "**",
+          ("The FSI purchase rate (premium FSI + TDR + ancillary premium, per sq.ft of purchased FSI) was "
+           "NOT supplied, so each scenario is shown across a range of rates. Quote the row for the rate the "
+           "developer confirms; never quote the Rs.0 row as the bid." if unknown else
+           f"At the supplied purchase rate of Rs.{rows[0]['inp'].fsi_purchase_psf:,.0f}/sq.ft."),
+          "'none' means the margin is not reachable even with free land.", ""]
+    for r in rows:
+        L += [f"*Scenario {r['label']} - {r['road_m']:g} m road*", "",
+              "| Purchase rate | Margin before land | " + " | ".join(f"at {m:g}%" for m in margins) + " |",
+              "|---" * (len(margins) + 2) + "|"]
+        for g in r["grid"]:
+            L.append(f"| Rs.{g['rate']:,.0f}/sq.ft (Rs.{g['purchase_cr']:,.2f} Cr) | {g['margin_before_land_pct']}% | "
+                     + " | ".join((f"{g['ceilings'][m]:,.2f}" if g['ceilings'][m] > 0 else "none") for m in margins) + " |")
+        L.append("")
+    L += ["", "=== END COMPUTED SCENARIOS ==="]
     return "\n".join(L)
 
 

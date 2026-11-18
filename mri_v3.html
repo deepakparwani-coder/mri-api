@@ -2090,6 +2090,9 @@ function go(){
             }
             if (p.status === "done") {
               doneMeta = p.done_meta;
+              // The server's finalised text (tables separated, site score
+              // checked) replaces the streamed draft for the final render/PDF.
+              if (p.final_text) fullText = p.final_text;
               finish();
               return;
             }
