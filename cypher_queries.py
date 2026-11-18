@@ -94,14 +94,15 @@ QUERY_DEFINITIONS = {
         ),
         "cypher": """
             MATCH (c:City {name: $city})-[r:MARKET_SNAPSHOT]->(q:Quarter)
-            WITH q, r ORDER BY q.sort_order DESC LIMIT 4
+            WITH c, q, r ORDER BY q.sort_order DESC LIMIT 4
+            OPTIONAL MATCH (c)-[sp:SALEABLE_PRICE_AT]->(q)
             RETURN q.name AS quarter,
                    r.supply_units AS supply,
                    r.sales_units AS sales,
                    r.unsold_units AS unsold,
                    r.months_inv AS months_inv,
                    r.velocity_pct AS velocity,
-                   r.wt_avg_price_psf AS price_psf,
+                   coalesce(r.wt_avg_price_psf, sp.wt_avg) AS price_psf,
                    r.cost_of_flat_lacs AS cost_lacs,
                    r.new_supply_units AS new_supply,
                    r.value_sold_cr AS value_sold_cr
@@ -261,11 +262,11 @@ QUERY_DEFINITIONS = {
                    ft.category AS category,
                    r.annual_sales_units AS annual_sales,
                    r.unsold_units AS unsold,
-                   r.velocity_pct AS velocity,
-                   r.months_inv_annual AS months_inv,
-                   r.efficiency_pct AS efficiency,
-                   r.wt_avg_saleable_psf AS saleable_psf,
-                   r.wt_avg_carpet_psf AS carpet_psf,
+                   coalesce(r.velocity_pct, r.monthly_sales_velocity_pct) AS velocity,
+                   coalesce(r.months_inv_annual, r.annual_months_inventory) AS months_inv,
+                   coalesce(r.efficiency_pct, r.product_efficiency_pct) AS efficiency,
+                   coalesce(r.wt_avg_saleable_psf, r.wt_avg_saleable_price_psf) AS saleable_psf,
+                   coalesce(r.wt_avg_carpet_psf, r.wt_avg_carpet_price_psf) AS carpet_psf,
                    r.saleable_min_size AS min_size,
                    r.saleable_max_size AS max_size,
                    r.min_cost_lacs AS min_cost,
@@ -288,13 +289,13 @@ QUERY_DEFINITIONS = {
             MATCH (c:City {name: $city})-[r:TICKET_SIZE_PERFORMANCE]->(ts:TicketSizeBand)
             RETURN ts.range AS ticket_range,
                    r.annual_sales_units AS annual_sales,
-                   r.qtr_sales_units AS qtr_sales,
+                   coalesce(r.qtr_sales_units, r.sales_units) AS qtr_sales,
                    r.unsold_units AS unsold,
-                   r.supply_units AS supply,
-                   r.wt_avg_saleable_psf AS saleable_psf,
-                   r.velocity_pct AS velocity,
-                   r.efficiency_pct AS efficiency,
-                   r.months_inv AS months_inv
+                   coalesce(r.supply_units, r.annual_marketable_supply_units) AS supply,
+                   coalesce(r.wt_avg_saleable_psf, r.wt_avg_saleable_price_psf) AS saleable_psf,
+                   coalesce(r.velocity_pct, r.monthly_sales_velocity_pct) AS velocity,
+                   coalesce(r.efficiency_pct, r.product_efficiency_pct) AS efficiency,
+                   coalesce(r.months_inv, r.annual_months_inventory) AS months_inv
             ORDER BY ts.sort_order
         """,
     },
@@ -315,9 +316,9 @@ QUERY_DEFINITIONS = {
                    r.flat_types AS flat_types,
                    r.annual_sales_units AS annual_sales,
                    r.unsold_units AS unsold,
-                   r.wt_avg_saleable_psf AS saleable_psf,
-                   r.velocity_pct AS velocity,
-                   r.efficiency_pct AS efficiency
+                   coalesce(r.wt_avg_saleable_psf, r.wt_avg_saleable_price_psf) AS saleable_psf,
+                   coalesce(r.velocity_pct, r.monthly_sales_velocity_pct) AS velocity,
+                   coalesce(r.efficiency_pct, r.product_efficiency_pct) AS efficiency
             ORDER BY us.sort_order
         """,
     },
@@ -337,9 +338,9 @@ QUERY_DEFINITIONS = {
                    r.flat_types AS flat_types,
                    r.annual_sales_units AS annual_sales,
                    r.unsold_units AS unsold,
-                   r.wt_avg_carpet_psf AS carpet_psf,
-                   r.velocity_pct AS velocity,
-                   r.efficiency_pct AS efficiency
+                   coalesce(r.wt_avg_carpet_psf, r.wt_avg_carpet_price_psf) AS carpet_psf,
+                   coalesce(r.velocity_pct, r.monthly_sales_velocity_pct) AS velocity,
+                   coalesce(r.efficiency_pct, r.product_efficiency_pct) AS efficiency
             ORDER BY us.sort_order
         """,
     },
@@ -388,12 +389,12 @@ QUERY_DEFINITIONS = {
             RETURN dr.range AS distance_range,
                    r.annual_sales_units AS annual_sales,
                    r.unsold_units AS unsold,
-                   r.supply_units AS supply,
+                   coalesce(r.supply_units, r.annual_marketable_supply_units) AS supply,
                    r.total_supply_units AS total_supply,
-                   r.wt_avg_saleable_psf AS saleable_psf,
-                   r.velocity_pct AS velocity,
-                   r.months_inv_annual AS months_inv,
-                   r.efficiency_pct AS efficiency
+                   coalesce(r.wt_avg_saleable_psf, r.wt_avg_saleable_price_psf) AS saleable_psf,
+                   coalesce(r.velocity_pct, r.monthly_sales_velocity_pct) AS velocity,
+                   coalesce(r.months_inv_annual, r.annual_months_inventory) AS months_inv,
+                   coalesce(r.efficiency_pct, r.product_efficiency_pct) AS efficiency
             ORDER BY dr.sort_order
         """,
     },

@@ -388,8 +388,20 @@ def qualifier_spec(inp=None, lf_price=None, lf_price_source="",
         if inp is not None:
             cur = getattr(inp, f.key, None)
             confirmed = f.key in (getattr(inp, "user_confirmed", None) or [])
+            _rec = {"price_psf": getattr(inp, "price_psf_source", "") or "",
+                    "monthly_velocity_pct": getattr(inp, "velocity_source", "") or "",
+                    "fsi": getattr(inp, "fsi_source", "") or "",
+                    "fsi_authority": ("UDCPR module, from the pin's location - confirm"
+                                      if (getattr(inp, "fsi_source", "") or "").startswith("UDCPR") else "")
+                    }.get(f.key, "")
             if f.key == "price_psf" and cur is None and lf_price:
                 value, status, source = lf_price, "derived", (lf_price_source or "LF data")
+            elif cur is not None and not confirmed and _rec.startswith(("LF ", "UDCPR")):
+                # Filled from LF data or the UDCPR table by the engine - DERIVED,
+                # with its source. Without this branch a value read from LF looked
+                # "different from the default" and was printed SUPPLIED / "read from
+                # your question", which a developer reads as his own number.
+                value, status, source = cur, "derived", _rec
             elif f.key == "monthly_velocity_pct" and cur is None and lf_velocity:
                 value, status, source = lf_velocity, "derived", "LF absorption series"
             elif cur is not None and (confirmed or cur != default):
@@ -398,8 +410,10 @@ def qualifier_spec(inp=None, lf_price=None, lf_price_source="",
             elif cur is not None:
                 value = cur
 
-        # FSI carries its own explicit flag, older than this spec. Honour it.
-        if f.key == "fsi" and inp is not None and getattr(inp, "fsi_assumed", True) is False:
+        # FSI carries its own explicit flag, older than this spec. Honour it -
+        # unless the engine derived it from the UDCPR table.
+        if (f.key == "fsi" and inp is not None and getattr(inp, "fsi_assumed", True) is False
+                and not (getattr(inp, "fsi_source", "") or "").startswith("UDCPR")):
             status = "supplied"
             source = ("confirmed by you" if "fsi" in (getattr(inp, "user_confirmed", None) or [])
                       else "read from your question")
@@ -498,7 +512,8 @@ def confirmation_summary(inp):
             shown = f"{v:,.0f}" if abs(v - round(v)) < 1e-9 else f"{v:,.2f}"
         else:
             shown = str(v)
-        rows.append(f"| {f['label']} | {shown}{(' ' + f['unit']) if f['unit'] else ''} "
+        unit = "" if f["key"] in ("plot_sqft", "site_pin", "fsi_authority") else f["unit"]
+        rows.append(f"| {f['label']} | {shown}{(' ' + unit) if unit and v is not None else ''} "
                     f"| {f['status'].upper()} | {f['source']} |")
     return ("| Input | Value | Status | Basis |\n"
             "|---|---|---|---|\n" + "\n".join(rows))

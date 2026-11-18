@@ -1774,7 +1774,7 @@ def handle_query():
     # where 12 of 20 cells did not reconcile, and an IRR off by 18 points -
     # none of which raised an error.
     _feas_block, _feas_why = build_feasibility_block(
-        user_query, data_results, overrides=body.get('overrides'))
+        user_query, data_results, overrides=body.get('overrides'), geo=geo)
     print(f"[DIAG-8] FEASIBILITY_CALC: {_feas_why}")
     # The price and its quarter are the single most consequential inputs in the
     # whole report. Log them explicitly so a stale one is greppable, not
@@ -1947,7 +1947,7 @@ def handle_query():
         fired_categories = classify_web_intent(user_query) if web_mode else []
 
         # Extract text from potentially mixed content blocks (text + web_search results)
-        response_text = _continued_text
+        response_text = reconcile_site_score(_continued_text)
         web_searches_made = [q for q in _searches_seen if q]
         for search_query in web_searches_made:
             print(
@@ -2073,7 +2073,7 @@ def _latest_row(result):
 # is how an unrelated series got to decide what a project sells for.
 _PRICE_QUERIES = ("price_trend_saleable", "micromarket_price_trend", "price_trend")
 _CARPET_PRICE_QUERIES = ("price_trend_carpet",)
-_VELOCITY_QUERIES = ("velocity_trend",)
+_VELOCITY_QUERIES = ("velocity_trend", "market_overview")
 
 
 def _lf_price_and_velocity(data_results, want_carpet=False):
@@ -2235,7 +2235,111 @@ def _jurisdiction_hint(user_query, data_results):
     return None
 
 
-def build_feasibility_block(user_query, data_results, overrides=None):
+_ROAD_RE = [
+    re.compile(r"road\s*width\s*(?:of|is|=|:|-)?\s*(\d{1,2}(?:\.\d+)?)\s*(?:m|mt|mtr|mtrs|meter|metre|meters|metres)?\b", re.I),
+    re.compile(r"(\d{1,2}(?:\.\d+)?)\s*-?\s*(?:m|mt|mtr|mtrs|meter|metre|meters|metres)\.?\s*(?:wide\s+)?(?:dp\s+)?road", re.I),
+]
+
+
+def _road_width_m(text):
+    for rx in _ROAD_RE:
+        m = rx.search(text or "")
+        if m:
+            v = float(m.group(1))
+            if 3 <= v <= 90:
+                return v
+    return None
+
+
+def _udcpr_fsi(user_query, geo):
+    """FSI for the stated road width from the trusted UDCPR module, or None.
+
+    Returns (fsi_dict, authority_label, facts_markdown). The module holds Table
+    6-G verbatim; the model used to fetch it from the web and left the 60%
+    ancillary FSI out of the plot's building potential."""
+    road = _road_width_m(user_query)
+    if not road:
+        return None
+    try:
+        from udcpr_feasibility import effective_fsi, is_udcpr_applicable
+    except Exception:
+        return None
+    g = geo or {}
+    place = " ".join(str(g.get(k) or "") for k in ("locality", "city", "district", "state", "display_name"))
+    if not (g.get("regulatory_regime") == "UDCPR" or is_udcpr_applicable(place + " " + (user_query or ""))):
+        return None
+    muncorp = bool(re.search(r"pune municipal|pimpri|chinchwad|\bpmc\b|\bpcmc\b", place + " " + (user_query or ""), re.I))
+    authority = "muncorp" if muncorp else "other"
+    alt = "other" if muncorp else "muncorp"
+    f, fa = effective_fsi(road, authority), effective_fsi(road, alt)
+    if not f:
+        return None
+    label = ("Municipal Corporation column" if muncorp else
+             "remaining authorities/areas column (pin is outside PMC/PCMC - e.g. PMRDA)")
+    facts = (
+        "=== UDCPR FSI FOR THE STATED ROAD WIDTH (from the trusted UDCPR module - use these, do not re-derive) ===\n"
+        f"Road width {road:g} m, UDCPR Reg. 6.3 / Table 6-G, {label}:\n"
+        f"  basic {f['basic_fsi']:.2f} + premium {f['premium_fsi']:.2f} + TDR {f['tdr_loading']:.2f} "
+        f"= maximum potential {f['max_potential_fsi']:.2f}\n"
+        f"  ancillary FSI (residential, UDCPR 6.3 Note i) 60% of that = {f['ancillary_fsi']:.2f}, "
+        f"over and above -> total building potential {f['effective_max_fsi']:.2f}\n"
+        f"If the plot were under a Municipal Corporation instead ({alt if muncorp else 'muncorp'} column): "
+        f"maximum potential {fa['max_potential_fsi']:.2f}, with ancillary {fa['effective_max_fsi']:.2f}.\n"
+        "The appraisal's FSI is the maximum potential (basic + premium + TDR). State the ancillary FSI "
+        "separately, and say premium FSI and TDR are purchased, not automatic. Confirm the authority "
+        "and the sanctioned road width before relying on either figure.\n"
+    )
+    return f, label, facts
+
+
+_SCORE_ROW_RE = re.compile(r"^\s*\|([^|\n]+)\|.*\|\s*(\d{1,2})(?:\s*/\s*10)?\s*\|\s*$")
+_SCORE_TOTAL_RE = re.compile(r"(\d{1,3})\s*/\s*80\b")
+
+
+def _band80(n):
+    return "STRONG" if n > 65 else "MODERATE" if n >= 45 else "WEAK"
+
+
+def reconcile_site_score(text):
+    """Recompute the site score from the scorecard rows the report shows.
+
+    A report stated 59/80 over seven rows that sum to 53 (one parameter never
+    scored). Prose totals are arithmetic in prose; this replaces them with the
+    sum of the rows and says so."""
+    if not text or not _SCORE_TOTAL_RE.search(text):
+        return text
+    m = re.search(r"SITE\s+SCORECARD|Site\s+scorecard|STEP\s*2\b", text)
+    if not m:
+        return text
+    seg_lines, rows = text[m.start():].split("\n"), []
+    for ln in seg_lines[1:]:
+        if re.match(r"^\s*(#|\*\*STEP|STEP\s*\d)", ln) and rows:
+            break
+        r = _SCORE_ROW_RE.match(ln)
+        if r and not re.search(r"parameter|---", r.group(1), re.I):
+            v = int(r.group(2))
+            if 0 <= v <= 10:
+                rows.append((r.group(1).strip(), v))
+    if len(rows) < 3:
+        return text
+    total, n = sum(v for _, v in rows), len(rows)
+    stated = {int(x) for x in _SCORE_TOTAL_RE.findall(text)}
+    if n == 8 and stated == {total}:
+        return text
+    if n == 8:
+        new, note = f"{total}/80", f"{total}/80 is the sum of the eight scorecard rows."
+    else:
+        new = f"{total}/{n * 10}"
+        note = (f"{total}/{n * 10} is the sum of the {n} scorecard rows shown; "
+                f"{8 - n} of the 8 parameters {'was' if 8 - n == 1 else 'were'} not scored, so no /80 score exists.")
+    text = _SCORE_TOTAL_RE.sub(new, text)
+    for w in ("STRONG", "MODERATE", "WEAK"):
+        text = re.sub(rf"({re.escape(new)}\s*[-\u2013\u2014:]*\s*){w}\b",
+                      rf"\g<1>{_band80(round(total * 80 / (n * 10)))}", text)
+    return text + f"\n\n> *Site score recomputed by the system: {note}*\n"
+
+
+def build_feasibility_block(user_query, data_results, overrides=None, geo=None):
     """Return (markdown_block, diagnostic) - block is None when not applicable."""
     if not _FEAS_OK:
         return None, "calculator unavailable"
@@ -2256,6 +2360,25 @@ def build_feasibility_block(user_query, data_results, overrides=None):
     _auth = (overrides or {}).get("fsi_authority") or _jurisdiction_hint(user_query, data_results)
     if _auth:
         inp = _qual_calib(inp, _auth)
+
+    # The user gave a map link: that IS a supplied site pin.
+    if geo and geo.get("lat") is not None and not getattr(inp, "site_pin", None):
+        inp.site_pin = f"{geo['lat']:.6f}, {geo['lng']:.6f}"
+
+    # FSI from the stated road width, out of the UDCPR table rather than a
+    # silent 2.0 that contradicts the regulatory section of the same report.
+    _udcpr = None
+    if getattr(inp, "fsi_assumed", True) and "fsi" not in (getattr(inp, "user_confirmed", None) or []):
+        _udcpr = _udcpr_fsi(user_query, geo)
+        if _udcpr:
+            _fd, _lbl, _ = _udcpr
+            inp.fsi = _fd["max_potential_fsi"]
+            inp.fsi_assumed = False
+            inp.fsi_source = (f"UDCPR Table 6-G, {_fd['road_width_m']:g} m road, {_lbl.split(' (')[0]}: "
+                              f"basic {_fd['basic_fsi']:.2f} + premium {_fd['premium_fsi']:.2f} + TDR {_fd['tdr_loading']:.2f}")
+            if not getattr(inp, "fsi_authority", None):
+                inp.fsi_authority = _lbl
+    _udcpr_facts = _udcpr[2] if _udcpr else ""
 
     want_carpet = bool(re.search(r"carpet|rera.basis", user_query or "", re.I))
     lf_price, lf_vel, lf_basis, lf_qtr, lf_detail = _lf_price_and_velocity(
@@ -2278,6 +2401,7 @@ def build_feasibility_block(user_query, data_results, overrides=None):
             f"LF knowledge base, {lf_basis} price, {lf_qtr or 'latest available quarter'}")
     if inp.monthly_velocity_pct is None and lf_vel:
         inp.monthly_velocity_pct = lf_vel
+        inp.velocity_source = f"LF sales velocity, {lf_qtr or 'latest available quarter'}"
 
     if not inp.is_sufficient() or inp.price_psf is None:
         missing = inp.missing()
@@ -2299,11 +2423,17 @@ def build_feasibility_block(user_query, data_results, overrides=None):
             "to the reader that reads as 'derived from data'.\n"
             "Write the market analysis you CAN support from LF data, then state "
             "plainly which inputs are needed to run the appraisal, and stop.\n"
+            "NO INVESTMENT VERDICT: with the economics not run there is no GO, "
+            "CONDITIONAL GO or NO-GO. The verdict line must read exactly "
+            "'VERDICT: NOT ASSESSED - economics not run (missing: <the inputs above>)'. "
+            "A site screen (scorecard, regulatory, market) may still be reported "
+            "under that line.\n"
             "\n=== INPUTS AS THEY STAND ===\n"
             "Reproduce this table verbatim in the report under 'Assumptions and "
             "inputs'. It is the reader's only means of telling a confirmed "
             "figure from a default.\n"
             + _qual_summary(inp) + "\n"
+            + ("\n" + _udcpr_facts if _udcpr_facts else "")
         )
         return block, "ABSTAINED (block states the gap): " + ", ".join(missing)
     try:
@@ -2335,7 +2465,8 @@ def build_feasibility_block(user_query, data_results, overrides=None):
         "not restate a DEFAULT as though it were supplied or derived.\n"
         + _qual_summary(inp) + "\n"
     )
-    return header + "\n" + block + "\n" + inputs_table, f"computed [{lf_detail}]"
+    return (header + "\n" + block + "\n" + inputs_table
+            + ("\n" + _udcpr_facts if _udcpr_facts else "")), f"computed [{lf_detail}]"
 
 
 # ── Generation deadline ─────────────────────────────────────────────────────
