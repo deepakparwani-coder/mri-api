@@ -1437,6 +1437,7 @@ def main() -> int:
             fl = FastLoader(session)
             fl.merge_city()
 
+            failed_files = []
             for i, f in enumerate(files, 1):
                 t0 = time.time()
                 try:
@@ -1444,6 +1445,7 @@ def main() -> int:
                     log.info(f"[{i}/{len(files)}] {f.name}  ({time.time()-t0:.1f}s)")
                 except Exception as e:
                     log.exception(f"Failed: {f.name}: {e}")
+                    failed_files.append((f.name, f"{e.__class__.__name__}: {str(e)[:300]}"))
                     continue
 
             counts = fl.finalize_city_counts()
@@ -1457,6 +1459,23 @@ def main() -> int:
             log.info(f"✓ Total load time: {time.time()-start:.1f}s")
 
             ok = run_verification(session, baseline)
+            # A file that failed used to be logged and skipped, and the run still
+            # exited 0. On 16 Nov the project files failed for Hinjewadi Nov 26
+            # (2 of 45 projects loaded) and nothing on screen said so.
+            if failed_files:
+                ok = False
+                log.error("═" * 70)
+                log.error(f"❌ {len(failed_files)} FILE(S) FAILED TO LOAD — the city is INCOMPLETE:")
+                for name, err in failed_files:
+                    log.error(f"   {name}: {err}")
+                log.error("═" * 70)
+            if EXPECTED_PROJECTS is not None and counts["projects"] != EXPECTED_PROJECTS:
+                ok = False
+                log.error(f"❌ Expected {EXPECTED_PROJECTS} projects for {CITY_NAME}, loaded {counts['projects']}.")
+            if EXPECTED_MICROMARKETS is not None and counts["micromarkets"] != EXPECTED_MICROMARKETS:
+                ok = False
+                log.error(f"❌ Expected {EXPECTED_MICROMARKETS} micromarkets for {CITY_NAME}, loaded {counts['micromarkets']}.")
+            log.info("RESULT: " + ("LOAD COMPLETE" if ok else "LOAD INCOMPLETE — see errors above"))
             return 0 if ok else 3
 
     except Exception as e:
